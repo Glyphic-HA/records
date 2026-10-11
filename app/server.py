@@ -64,7 +64,8 @@ def _sync_state() -> dict:
         tail = config.SYNC_LOG.read_text(encoding="utf-8", errors="replace").splitlines()[-6:]
     return {"running": running, "state": "running" if running else st.get("state"), "started_at": st.get("started_at"),
             "finished_at": st.get("finished_at"), "summary": st.get("summary"), "error": st.get("error"),
-            "log": tail, "synced_at": store.load_collection().get("synced_at")}
+            "log": tail, "synced_at": store.load_collection().get("synced_at"),
+            "progress": st.get("progress") if running else None}
 
 
 def _find(release_id: int) -> dict | None:
@@ -95,7 +96,8 @@ def create_app() -> Flask:
     @app.get("/api/health")
     def health():
         data = store.load_collection()
-        return jsonify(ok=True, records=len(data["records"]), synced_at=data.get("synced_at"))
+        return jsonify(ok=True, records=len(data["records"]), synced_at=data.get("synced_at"),
+                       api_version=config.API_VERSION)
 
     @app.get("/api/collection")
     def collection():
@@ -115,6 +117,7 @@ def create_app() -> Flask:
             records=records,
             synced_at=data.get("synced_at"),
             username=data.get("username") or config.DISCOGS_USERNAME or None,
+            api_version=config.API_VERSION,
             can_edit=not config.EDIT_TOKEN,
             can_sync=bool(config.DISCOGS_TOKEN and config.DISCOGS_USERNAME),
             currency=config.CURRENCY,

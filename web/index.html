@@ -33,6 +33,7 @@
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8.5" cy="8.5" r="1.6" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/></svg>
         <span>Surprise me</span>
       </button>
+      <span class="sync-note num" id="sync-note" hidden></span>
       <button class="icon-btn" id="sync-btn" type="button" aria-label="Sync with Discogs now" title="Sync with Discogs now" hidden>
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M20 12a8 8 0 0 1-14.3 4.9M4 12a8 8 0 0 1 14.3-4.9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M18.5 3v4.2h-4.2M5.5 21v-4.2h4.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
@@ -65,6 +66,7 @@
     <button type="button" class="text-btn" id="f-clear" hidden>Clear filters</button>
   </form>
 
+  <div class="notice" id="notice" role="alert" hidden></div>
   <main id="view" tabindex="-1"></main>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>

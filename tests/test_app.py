@@ -483,3 +483,31 @@ def test_api_includes_people(client):
     r = body["records"][0]
     assert r["credits"] and r["community"]["have"] == 4100 and r["weight"] == 230 and r["format_text"] == "Clear"
     assert body["artists"]["82730"]["members"]
+
+
+def test_page_and_server_agree_on_api_version(client):
+    import re
+    from pathlib import Path
+    js = (Path(__file__).resolve().parent.parent / "web/assets/app.js").read_text()
+    expected = int(re.search(r"const EXPECTED_API = (\d+)", js).group(1))
+    assert expected == config.API_VERSION
+    assert client.get("/api/collection").get_json()["api_version"] == config.API_VERSION
+    assert client.get("/api/health").get_json()["api_version"] == config.API_VERSION
+
+
+def test_sync_reports_progress(client, monkeypatch):
+    seen = []
+    real = sync.progress
+
+    def spy(phase, done, total):
+        real(phase, done, total)
+        seen.append(sync.read_status().get("progress"))
+    monkeypatch.setattr(sync, "progress", spy)
+    monkeypatch.setattr(sync, "Discogs", lambda: fake_client())
+    store.save_collection({"records": []})
+    assert sync.main(["--no-images"]) == 0
+    phases = [p["phase"] for p in seen if p]
+    assert "Reading your collection" in phases and "Reading release details" in phases
+    assert sync.read_status()["state"] == "done"
+    # progress is only reported while a sync is running
+    assert client.get("/api/sync").get_json()["progress"] is None

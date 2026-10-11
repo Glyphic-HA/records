@@ -6,6 +6,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Bumped whenever the API gains fields the page relies on. The page compares it with the
+# version it expects and tells you to restart the server if they differ.
+API_VERSION = 5
+
 
 def _load_dotenv(path: Path) -> None:
     """Minimal .env reader: KEY=VALUE lines, # comments, optional quotes.

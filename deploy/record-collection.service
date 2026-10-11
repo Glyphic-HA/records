@@ -7,7 +7,7 @@ Wants=network-online.target
 User=@USER@
 WorkingDirectory=@DIR@
 EnvironmentFile=-@DIR@/.env
-ExecStart=@DIR@/.venv/bin/gunicorn --workers 2 --threads 4 --bind 0.0.0.0:@PORT@ --access-logfile - app.server:app
+ExecStart=@DIR@/.venv/bin/gunicorn --workers 2 --threads 4 --bind 0.0.0.0:@PORT@ --reload --reload-extra-file @DIR@/.env --access-logfile - app.server:app
 Restart=on-failure
 RestartSec=5
 

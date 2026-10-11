@@ -68,6 +68,7 @@ def run_sync(client: Discogs, *, details_limit: int | None, fetch_images: bool,
     """Returns a summary dict: {"records", "added", "removed", "details_pending", "value"}."""
     if not client.token:
         log("WARNING: DISCOGS_TOKEN not set - only a public collection can be read, and slowly.")
+    progress("Reading your collection", 0, 0)
     log(f"Fetching collection for {client.username} ...")
     fresh = [record_from_collection_item(item) for item in client.collection()]
     log(f"  {len(fresh)} items in collection")
@@ -106,6 +107,8 @@ def run_sync(client: Discogs, *, details_limit: int | None, fetch_images: bool,
                 r["cover_url"] = det["cover_url"]
         except DiscogsError as exc:
             log(f"  ! {r['id']} {r['artist']} - {r['title']}: {exc}")
+        if n % 10 == 0 or n == len(todo):
+            progress("Reading release details", n, len(todo))
         if n % 25 == 0:
             store.save_collection(data)  # keep progress if interrupted
             log(f"  {n}/{len(todo)}")
@@ -126,6 +129,8 @@ def run_sync(client: Discogs, *, details_limit: int | None, fetch_images: bool,
                 by_id[r["id"]] = r["price"]
             except DiscogsError as exc:
                 log(f"  ! price {r['id']}: {exc}")
+            if n % 10 == 0 or n == len(batch):
+                progress("Checking prices", n, len(batch))
             if n % 50 == 0:
                 store.save_collection(data)
         store.save_collection(data)
@@ -190,6 +195,8 @@ def sync_artists(client: Discogs, records: list[dict], limit: int | None = None)
             done += 1
         except DiscogsError as exc:
             log(f"  ! artist {i}: {exc}")
+        if n % 10 == 0 or n == len(todo):
+            progress("Looking up band members", n, len(todo))
         if n % 50 == 0:
             store.write_json(config.ARTISTS_PATH, cache)
     store.write_json(config.ARTISTS_PATH, cache)
@@ -331,6 +338,15 @@ def is_running() -> bool:
             return False
         except BlockingIOError:
             return True
+
+
+def progress(phase: str, done: int, total: int) -> None:
+    """Record what the sync is doing, for the progress shown in the web app. Only while the
+    status file says a sync is running (so tests and one-off calls don't create one)."""
+    st = read_status()
+    if st.get("state") == "running":
+        st["progress"] = {"phase": phase, "done": done, "total": total, "at": now_iso()}
+        store.write_json(config.SYNC_STATUS, st)
 
 
 def read_status() -> dict:

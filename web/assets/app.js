@@ -24,6 +24,7 @@ const sortName = (s) => (s || "").replace(/^(the|a|an)\s+/i, "").trim();
 const sortKey = (s) => sortName(s).toLowerCase();
 const cmpKey = (a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
 const VIEWS = ["gallery", "list", "shelves", "stats"];
+const EXPECTED_API = 5; // must match API_VERSION in app/config.py
 const firstLetter = (s) => { const c = sortName(s).charAt(0).toUpperCase(); return /[A-Z]/.test(c) ? c : "#"; };
 
 function sleeveColor(id) {
@@ -470,7 +471,10 @@ function topPeople(list, re, n = 10) {
 function peopleSections(list) {
   const credited = list.filter((r) => r.credits?.length).length;
   if (!credited) {
-    return `<div class="wide"><h2>People behind the records</h2><p class="sub">Producers, engineers and band family trees show up after the next Discogs sync.</p></div>`;
+    const running = state.sync?.running;
+    return `<div class="wide"><h2>People behind the records</h2><p class="sub">${running
+      ? `Collecting credits from Discogs now. This fills in when the sync finishes. <span id="people-progress">${esc(syncProgressText(state.sync))}</span>`
+      : `Producers, engineers and band family trees need credits from Discogs, which haven't been collected yet. Press the sync button (top right) to start. The first run reads every record, so it takes about 20 minutes.`}</p></div>`;
   }
   const producers = topPeople(list, /^(co-)?producer$|^produced by$/i);
   const engineers = topPeople(list, /engineer|^recorded by$|^mixed by$/i);
@@ -819,7 +823,11 @@ function growthSeries(dated) {
   if (!keys.length) return [];
   const out = [];
   let [y, m] = keys[0].split("-").map(Number), total = 0;
-  const [ey, em] = keys[keys.length - 1].split("-").map(Number);
+  // run the line up to this month, not just the last month something was added
+  const now = new Date();
+  const lastKey = keys[keys.length - 1];
+  const nowKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const [ey, em] = (nowKey > lastKey ? nowKey : lastKey).split("-").map(Number);
   while (y < ey || (y === ey && m <= em)) {
     const k = `${y}-${String(m).padStart(2, "0")}`;
     total += months.get(k) || 0;
@@ -1392,12 +1400,40 @@ const ago = (iso) => {
   return `${Math.round(s / 86400)} days ago`;
 };
 
+function syncProgressText(st) {
+  const p = st?.progress;
+  if (!st?.running) return "";
+  if (!p || !p.total) return p?.phase ? `${p.phase}…` : "Syncing…";
+  const left = p.total - p.done;
+  const mins = Math.ceil(left / 55); // Discogs allows ~60 requests a minute
+  return `${p.phase}: ${fmtInt(p.done)} of ${fmtInt(p.total)}${left > 30 ? `, about ${mins} min left` : ""}`;
+}
+
 function paintSync(st) {
+  const changed = !!state.sync?.running !== !!st.running;
+  state.sync = st;
+  if (changed && state.view === "stats" && state.loaded && !$("#detail").open) render();
   const btn = $("#sync-btn");
   btn.hidden = !(state.meta.can_sync && state.meta.can_edit);
   btn.classList.toggle("spinning", !!st.running);
-  const label = st.running ? "Syncing with Discogs…" : `Last synced ${ago(st.synced_at || state.meta.synced_at)}. Sync now`;
+  const prog = syncProgressText(st);
+  const label = st.running ? `Syncing with Discogs. ${prog}` : `Last synced ${ago(st.synced_at || state.meta.synced_at)}. Sync now`;
   btn.title = label; btn.setAttribute("aria-label", label);
+  const note = $("#sync-note");
+  note.hidden = !st.running;
+  note.textContent = st.running ? (st.progress?.total ? `${Math.round((st.progress.done / st.progress.total) * 100)}%` : "Syncing") : "";
+  note.title = prog;
+  const box = $("#people-progress");
+  if (box) box.textContent = prog;
+}
+
+function checkVersion(v) {
+  const n = $("#notice");
+  if (v === EXPECTED_API) { n.hidden = true; return; }
+  n.hidden = false;
+  n.innerHTML = v < EXPECTED_API
+    ? `<b>The app was updated, but the Pi is still running the old server code</b>, so some features (like credits and band members) won't show up. On the Pi, run <code>cd ~/records &amp;&amp; ./deploy/setup.sh</code> once. After that, updates apply on their own after a <code>git pull</code>.`
+    : `<b>This page is out of date.</b> <a href="">Reload</a> to get the latest version.`;
 }
 
 async function pollSync(announce) {
@@ -1477,6 +1513,7 @@ async function load() {
     }));
     state.byUid = new Map(state.records.map((r) => [r.uid, r]));
     state.error = null;
+    checkVersion(data.api_version || 0);
     computeBins();
     computePeople();
   } catch (err) {

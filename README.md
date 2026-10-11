@@ -186,8 +186,10 @@ systemctl list-timers record-collection-sync    # when the next sync runs
 **Updating the app** after new changes are pushed to GitHub:
 
 ```bash
-cd ~/records && git pull && ./deploy/setup.sh
+cd ~/records && git pull
 ```
+
+The web app notices the new code and restarts itself within a few seconds. Run `./deploy/setup.sh` as well if the update notes mention new settings or services. If the page ever shows a notice saying the Pi is running old server code, `./deploy/setup.sh` fixes it.
 
 **Backing up.** Everything lives in `~/records/data/`. The collection and covers can be rebuilt from Discogs, but these files can't, so copy them off the Pi now and then: `bins.json` (hand-set bins), `backs.json` (back-cover picks), `shelves.json` (shelf layout and filing), `value_history.json` and `prices.json` (price history). From a Windows Command Prompt or PowerShell on your computer, use `pscp`, which comes with PuTTY:
 
