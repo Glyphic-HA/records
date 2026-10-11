@@ -49,14 +49,25 @@ Plan on about 30 minutes, plus 20 or so for the first sync to download your coll
 ### 3. Boot the Pi and connect to it
 
 1. Put the card in the Pi, connect Ethernet if you're using it, and plug in power. Give it **2–3 minutes**, because the first boot is slow.
-2. On your computer, open a terminal. On Windows, that's **PowerShell** (Start menu → type "PowerShell"). On a Mac, it's **Terminal**.
-3. Connect:
+2. Connect with **PuTTY**:
+   - **Host Name:** `records.local`, **Port:** `22`, **Connection type:** SSH.
+   - To reuse these settings, type `records` under **Saved Sessions** and click **Save**. Next time, just double-click it.
+   - Click **Open**. The first time, PuTTY shows a **Security Alert** about the host key. Click **Accept**, which is expected for a new Pi.
+   - At `login as:`, enter the username you set in Imager, then the password. Nothing appears while you type the password; that's normal.
+
+   <details><summary>Without PuTTY (PowerShell, Mac or Linux terminal)</summary>
+
    ```bash
    ssh eli@records.local
    ```
-   Type `yes` when it asks about the host's authenticity, then enter the password you set in Imager. If `records.local` isn't found, see [Troubleshooting](#troubleshooting).
+   Type `yes` to the authenticity question, then enter your password.
+   </details>
 
-Every command from here on runs **on the Pi**, in that SSH window.
+   If `records.local` isn't found, see [Troubleshooting](#troubleshooting).
+
+Every command from here on runs **on the Pi**, in that PuTTY window.
+
+> **PuTTY tips:** to paste a command, **right-click** anywhere in the window (Ctrl+V doesn't work). Selecting text with the mouse copies it automatically.
 
 ### 4. Update the system and install git
 
@@ -136,11 +147,13 @@ systemctl list-timers record-collection-sync    # when the next sync runs
 cd ~/records && git pull && ./deploy/setup.sh
 ```
 
-**Backing up.** Everything lives in `~/records/data/`: the collection, cached covers, and your bin locations. Everything except bin locations can be rebuilt from Discogs, so the one file worth copying off the Pi is `data/bins.json`. From your computer:
+**Backing up.** Everything lives in `~/records/data/`: the collection, cached covers, and your bin locations. Everything except bin locations can be rebuilt from Discogs, so the one file worth copying off the Pi is `data/bins.json`. From a Windows Command Prompt or PowerShell on your computer, use `pscp`, which comes with PuTTY:
 
-```bash
-scp eli@records.local:records/data/bins.json .
+```bat
+pscp eli@records.local:records/data/bins.json .
 ```
+
+To drag and drop files instead, [WinSCP](https://winscp.net) connects with the same host, username and password as PuTTY. On Mac or Linux, use `scp` with the same arguments.
 
 **Shutting down** before unplugging (this protects the SD card):
 
@@ -150,15 +163,11 @@ sudo shutdown now
 
 ## Troubleshooting
 
-**`ssh: Could not resolve hostname records.local`**
-Wait another minute; the first boot takes a while. If it still fails, find the Pi's IP address in your router's list of connected devices (it'll be named `records`) and use `ssh eli@192.168.x.x` instead. If it never shows up, the Wi-Fi details in Imager were probably wrong. Re-flash the card and check the Wi-Fi country too.
+**PuTTY says "Host does not exist" or "Unable to open connection" for `records.local`**
+Wait another minute; the first boot takes a while. If it still fails, find the Pi's IP address in your router's list of connected devices (it'll be named `records`) and put that address (e.g. `192.168.1.42`) in PuTTY's Host Name box instead. If it never shows up, the Wi-Fi details in Imager were probably wrong. Re-flash the card and check the Wi-Fi country too.
 
-**`REMOTE HOST IDENTIFICATION HAS CHANGED` when connecting**
-This happens if you've re-flashed the card, and it's expected. Clear the old entry, then connect again:
-
-```bash
-ssh-keygen -R records.local
-```
+**PuTTY shows a scary "Security Alert / host key does not match" warning**
+This is expected after you re-flash the card, because the Pi generated new keys. Click **Accept** to trust the new key. (If you *haven't* re-flashed, stop and work out why the key changed.) Using a plain `ssh` command instead? Run `ssh-keygen -R records.local` first.
 
 **The page doesn't load**
 Check the service:
