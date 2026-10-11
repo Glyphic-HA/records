@@ -85,6 +85,19 @@ cd records
 ./deploy/setup.sh
 ```
 
+> **Is the repo private?** Then `git clone` will ask for a username and fail with *"Password authentication is not supported"*. Give the Pi a read-only deploy key instead:
+>
+> ```bash
+> ssh-keygen -t ed25519 -C "records-pi" -f ~/.ssh/id_ed25519 -N ""
+> cat ~/.ssh/id_ed25519.pub
+> ```
+>
+> Select the `ssh-ed25519 …` line that prints (selecting copies it in PuTTY). On GitHub, open the repo's **Settings → Deploy keys → Add deploy key**, paste the line, leave *Allow write access* off, and save. Then clone with the SSH address, typing `yes` to GitHub's fingerprint:
+>
+> ```bash
+> git clone git@github.com:Glyphic-HA/records.git
+> ```
+
 The first run installs Python packages, which takes a few minutes on a Pi. It then creates a settings file called `.env` and stops to ask for your Discogs details. Open the file:
 
 ```bash
