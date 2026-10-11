@@ -871,7 +871,7 @@ function openDetail(uid, list = state.filtered) {
         ${fact("Added", esc(added))}
         ${priceFact(r)}
         <dt><label for="d-bin">Bin</label></dt>
-        <dd class="bin-field"><input id="d-bin" value="${esc(r.bin)}" maxlength="40" placeholder="${esc(r.bin ? "" : (r._bin || "—"))}" list="bin-labels" autocomplete="off" ${state.meta.can_edit ? "" : "disabled"}><small id="d-bin-msg">${binHelp(r)}</small></dd>
+        <dd class="bin-field"><input id="d-bin" value="${esc(r.bin)}" maxlength="40" placeholder="${esc(r.bin ? "" : (r._bin ? binName(r._bin) : "—"))}" list="bin-labels" autocomplete="off" ${state.meta.can_edit ? "" : "disabled"}><small id="d-bin-msg">${binHelp(r)}</small></dd>
       </dl>
       <div class="tracks"><h3>Tracklist</h3>${tracks.length
         ? `<ol>${tracks.map((t, n) => `<li><span class="pos">${esc(t.position || n + 1)}</span><span>${esc(t.title)}</span><span class="dur">${esc(t.duration)}</span></li>`).join("")}</ol>`
@@ -906,7 +906,8 @@ function openDetail(uid, list = state.filtered) {
       const out = await res.json();
       for (const x of state.records) if (x.id === r.id) x.bin = out.bin;
       computeBins();
-      bin.placeholder = r.bin ? "" : (r._bin || "—");
+      bin.value = r.bin;
+      bin.placeholder = r.bin ? "" : (r._bin ? binName(r._bin) : "—");
       $("#d-bin-msg").textContent = r.bin ? "Saved" : `Saved. ${binHelp(r)}`;
     } catch (err) {
       $("#d-bin-msg").textContent = `Not saved: ${err.message}`;
@@ -953,14 +954,32 @@ function bindDetail() {
 // whose "first artist" is the closest one at or before it.
 function binName(label) {
   const st = state.shelves?.stacks.find((x) => x.label === label);
-  return st ? st.name : `Cubby ${label}`;
+  return st ? st.name : `Bin ${label}`;
+}
+
+// Bin numbers read the whole wall like a page: units are bottom-aligned, so rows at the same
+// height line up across units; each wall row runs left to right, top row first.
+// Mirrors numbering() in app/shelves.py. Returns, per unit, the bin number of each cubby.
+function cubbyNumbers(units) {
+  const out = units.map((u) => new Array(u.cols * u.rows).fill(0));
+  const tallest = Math.max(...units.map((u) => u.rows));
+  let n = 1;
+  for (let level = tallest - 1; level >= 0; level--) {
+    units.forEach((u, ui) => {
+      const r = u.rows - 1 - level;
+      if (r < 0) return;
+      for (let c = 0; c < u.cols; c++) out[ui][r * u.cols + c] = n++;
+    });
+  }
+  return out;
 }
 
 function allBinLabels() {
   const sh = state.shelves;
   if (!sh) return [];
   const out = [];
-  for (const u of sh.units) for (let n = 1; n <= u.cols * u.rows; n++) out.push(`${u.id}${n}`);
+  const total = sh.units.reduce((a, u) => a + u.cols * u.rows, 0);
+  for (let n = 1; n <= total; n++) out.push(String(n));
   return out.concat(sh.stacks.map((x) => x.label));
 }
 
@@ -1027,23 +1046,24 @@ function renderShelves(main) {
     const href = hashFor("gallery", { bin: label, q: "", genre: "", decade: "", format: "", sort: "artist" });
     if (editing && !sh.stacks.some((x) => x.label === label)) {
       return `<div class="cubby editing ${extraClass}">
-        <span class="cubby-label">${esc(label)}</span>
-        <label class="start-field"><span class="sr-only">First artist in ${esc(label)}</span>
+        <span class="cubby-label">${esc(binName(label))}</span>
+        <label class="start-field"><span class="sr-only">First artist in ${esc(binName(label))}</span>
           <input data-start="${esc(label)}" value="${esc(sh.starts[label] || "")}" placeholder="First artist" list="artist-names" autocomplete="off"></label>
         <span class="cubby-count">${fmtInt(list.length)}</span></div>`;
     }
     return `<a class="cubby ${extraClass} ${full ? "full" : ""}" href="${href}" title="${esc(binName(label))}${range ? `: ${esc(range)}` : ""}">
       <span class="spines" aria-hidden="true">${spines(list)}</span>
-      <span class="cubby-meta"><span class="cubby-label">${esc(label)}</span><span class="cubby-count">${fmtInt(list.length)}${full ? `<span class="full-note"> · nearly full</span>` : ""}</span></span>
+      <span class="cubby-meta"><span class="cubby-label">${esc(/^\d+$/.test(label) ? `Bin ${label}` : label)}</span><span class="cubby-count">${fmtInt(list.length)}${full ? `<span class="full-note"> · nearly full</span>` : ""}</span></span>
       ${range ? `<span class="cubby-range">${esc(range)}</span>` : ""}</a>`;
   };
 
   let room = "";
-  for (const u of sh.units) {
+  const nums = cubbyNumbers(sh.units);
+  for (const [ui, u] of sh.units.entries()) {
     const stacks = sh.stacks.filter((x) => x.unit === u.id);
     room += `<div class="unit" style="--cols:${u.cols};--rows:${u.rows}">
       <div class="unit-top">${stacks.map((x) => `<div class="stack-slot" style="grid-column:${x.from_col} / ${x.to_col + 1}">${cubby(x.label, "stack")}<span class="stack-name">${esc(x.name)}</span></div>`).join("")}</div>
-      <div class="frame" role="group" aria-label="${esc(u.name)}">${Array.from({ length: u.cols * u.rows }, (_, i) => cubby(`${u.id}${i + 1}`)).join("")}</div>
+      <div class="frame" role="group" aria-label="${esc(u.name)}">${Array.from({ length: u.cols * u.rows }, (_, i) => cubby(String(nums[ui][i]))).join("")}</div>
       <p class="unit-name">${esc(u.name)}</p></div>`;
   }
   const stray = [...groups.keys()].filter((l) => !allBinLabels().includes(l));

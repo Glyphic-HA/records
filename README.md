@@ -153,7 +153,15 @@ To use plain **http://records.local**, run:
 
 ## Filing records on your shelves
 
-The **Shelves** page is set up for two cube units: a 2×4 on the left (cubbies **A1–A8**) and a 4×3 on the right (**B1–B12**). Cubbies are numbered left to right, top to bottom. There's also a **New arrivals** pile standing on top of the right unit.
+The **Shelves** page is set up for two cube units: a 2×4 on the left and a 4×3 on the right. The cubbies are **Bin 1 to Bin 20**, read across the whole wall like a page, top row first:
+
+```
+ 1  2
+ 3  4    5  6  7  8
+ 9 10   11 12 13 14
+15 16   17 18 19 20
+```
+ There's also a **New arrivals** pile standing on top of the right unit.
 
 **One-time setup:** open Shelves, click **Set up filing**, and type the artist of the *first* record in each cubby. Every record files itself into the cubby whose first artist comes at or just before its own, the same way you'd find it by hand ("The" is ignored, as on the List page). Cubbies you leave blank are skipped.
 
@@ -161,7 +169,7 @@ The **Shelves** page is set up for two cube units: a 2×4 on the left (cubbies *
 
 **When a cubby fills up:** a cubby turns gold and says "nearly full" at around 70 records. After you shift records along to the next cubby, update that cubby's first artist in **Edit filing**.
 
-**Exceptions:** type a bin into any record's **Bin** field to put it somewhere by hand. Hand-set bins always win; clear the field to go back to automatic filing.
+**Exceptions:** type a bin number (e.g. `7`) into any record's **Bin** field to put it somewhere by hand. Hand-set bins always win; clear the field to go back to automatic filing.
 
 **Different shelves?** The layout lives in `data/shelves.json`: units (id, name, cols, rows), stacks, and the first artist of each cubby. Edit it and reload the page.
 

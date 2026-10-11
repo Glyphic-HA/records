@@ -1,6 +1,13 @@
 """Shelf layout (data/shelves.json): the physical units, their cubbies, and alphabetical filing.
 
-Cubbies are named <unit id><n>, numbered left to right, top to bottom (A1, A2 ... B12).
+Cubbies are numbered as bins 1..N reading the whole wall like a page: units stand side by side
+on the floor (bottom-aligned), so a unit's rows line up with its neighbours' by height. Each
+wall row is read left to right across every unit, top row first. With the default layout:
+
+    1  2
+    3  4    5  6  7  8
+    9 10   11 12 13 14
+   15 16   17 18 19 20
 "stacks" are extra spots that aren't cubbies, like records standing on top of a unit. A stack
 with "new": true is the new-arrivals pile: records added to Discogs after "arrivals_since" go
 there until you mark the pile as shelved (which moves "arrivals_since" forward).
@@ -29,12 +36,43 @@ DEFAULT = {
 _ID = re.compile(r"^[A-Za-z0-9]{1,3}$")
 
 
-def labels(layout: dict) -> list[str]:
-    out = []
-    for u in layout["units"]:
-        out += [f"{u['id']}{n}" for n in range(1, u["cols"] * u["rows"] + 1)]
-    out += [s["label"] for s in layout.get("stacks", [])]
+def cubby_labels(units: list[dict]) -> list[str]:
+    total = sum(u["cols"] * u["rows"] for u in units)
+    return [str(n) for n in range(1, total + 1)]
+
+
+def numbering(units: list[dict]) -> list[list[int]]:
+    """Bin number of each cubby, per unit, in the unit's own row-major order.
+    Mirrors cubbyNumbers() in web/assets/app.js."""
+    out = [[0] * (u["cols"] * u["rows"]) for u in units]
+    tallest = max(u["rows"] for u in units)
+    n = 1
+    for level in range(tallest - 1, -1, -1):          # height above the floor, top first
+        for ui, u in enumerate(units):
+            r = u["rows"] - 1 - level                  # this unit's row at that height
+            if r < 0:
+                continue
+            for c in range(u["cols"]):
+                out[ui][r * u["cols"] + c] = n
+                n += 1
     return out
+
+
+def labels(layout: dict) -> list[str]:
+    return cubby_labels(layout["units"]) + [s["label"] for s in layout.get("stacks", [])]
+
+
+def _migrate_start_key(key: str, units: list[dict]) -> str:
+    """Older layouts named cubbies A1..A8, B1..B12; map those onto the 1..N numbering."""
+    m = re.match(r"^([A-Za-z0-9]{1,3}?)(\d+)$", key)
+    if not m or key.isdigit():
+        return key
+    nums = numbering(units)
+    for ui, u in enumerate(units):
+        if u["id"] == m.group(1):
+            n = int(m.group(2))
+            return str(nums[ui][n - 1]) if 1 <= n <= u["cols"] * u["rows"] else key
+    return key
 
 
 def default() -> dict:
@@ -93,6 +131,7 @@ def validate(data) -> dict:
     known = set(labels(layout))
     starts = {}
     for k, v in (data.get("starts") or {}).items():
+        k = _migrate_start_key(str(k), units)
         v = str(v or "").strip()[:80]
         if k in known and v:
             starts[k] = v

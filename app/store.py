@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import tempfile
 import threading
@@ -70,6 +71,9 @@ def set_bin(release_id: int, value: str) -> dict[str, str]:
     with _bins_lock:  # serialize read-modify-write across request threads
         bins = dict(load_bins())
         value = value.strip()[:40]
+        m = re.match(r"^bin\s*#?\s*(\d+)$", value, re.I)  # "Bin 7" / "bin #7" -> "7"
+        if m:
+            value = m.group(1)
         if value:
             bins[str(release_id)] = value
         else:

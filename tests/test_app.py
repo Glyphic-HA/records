@@ -264,6 +264,8 @@ def test_bins(client, monkeypatch):
     r = client.put("/api/bins/111", json={"bin": " B2 "})
     assert r.get_json() == {"id": 111, "bin": "B2"}
     assert client.get("/api/collection").get_json()["records"][0]["bin"] == "B2"
+    assert client.put("/api/bins/111", json={"bin": "Bin 7"}).get_json()["bin"] == "7"
+    assert client.put("/api/bins/111", json={"bin": "bin #12"}).get_json()["bin"] == "12"
     assert client.put("/api/bins/111", json={"bin": 5}).status_code == 400
     monkeypatch.setattr(config, "EDIT_TOKEN", "secret")
     assert client.put("/api/bins/111", json={"bin": "C"}).status_code == 403
@@ -382,10 +384,11 @@ def test_shelves_api(client):
     layout = client.get("/api/shelves").get_json()
     assert [u["id"] for u in layout["units"]] == ["A", "B"] and layout["stacks"][0]["label"] == "New"
     assert layout["stacks"][0]["new"] and layout["arrivals_since"]
-    layout["starts"] = {"A1": "!!!", "B3": "Fugazi", "Z9": "ignored", "A2": "  "}
+    layout["starts"] = {"1": "!!!", "11": "Fugazi", "21": "ignored", "2": "  ", "B4": "Hum"}
     saved = client.put("/api/shelves", json=layout).get_json()
-    assert saved["starts"] == {"A1": "!!!", "B3": "Fugazi"}
-    assert client.get("/api/shelves").get_json()["starts"]["B3"] == "Fugazi"
+    # old-style "B4" (end of the right unit's top row) migrates to bin 8
+    assert saved["starts"] == {"1": "!!!", "11": "Fugazi", "8": "Hum"}
+    assert client.get("/api/shelves").get_json()["starts"]["11"] == "Fugazi"
     bad = dict(layout, units=[{"id": "A", "cols": 0, "rows": 3}])
     assert client.put("/api/shelves", json=bad).status_code == 400
     assert client.put("/api/shelves", json=[1]).status_code == 400
@@ -410,3 +413,11 @@ def test_friendly_discogs_errors():
     with pytest.raises(DiscogsError) as e:
         c.get("/releases/1")
     assert "Couldn't reach Discogs" in str(e.value)
+
+
+
+def test_wall_numbering():
+    from app import shelves
+    nums = shelves.numbering(shelves.DEFAULT["units"])
+    assert nums[0] == [1, 2, 3, 4, 9, 10, 15, 16]                       # left 2x4
+    assert nums[1] == [5, 6, 7, 8, 11, 12, 13, 14, 17, 18, 19, 20]      # right 4x3
