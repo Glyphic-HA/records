@@ -1,0 +1,11 @@
+[Unit]
+Description=Sync record collection from Discogs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@DIR@
+EnvironmentFile=-@DIR@/.env
+ExecStart=@DIR@/.venv/bin/python -m app.sync

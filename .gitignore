@@ -1,0 +1,27 @@
+# secrets
+.env
+*.pem
+*.key
+id_*
+key
+key.pub
+
+# your data (synced from Discogs; back it up, don't commit it)
+data/
+
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# leftovers from the old version, if you check this out over it
+backend/
+frontend/
+node_modules/
+
+# os / editor
+.DS_Store
+Thumbs.db
+*.log

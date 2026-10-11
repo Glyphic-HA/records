@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Records</title>
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#16191d">
+  <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&display=swap">
+  <link rel="stylesheet" href="/assets/app.css">
+  <script>
+    // Apply the saved theme before first paint to avoid a flash.
+    try { const t = localStorage.getItem("rc-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="wordmark" href="#/gallery" aria-label="Records home">
+      <span class="wordmark-name">Records</span>
+      <span class="wordmark-count" id="total-count"></span>
+    </a>
+    <nav class="tabs" aria-label="Views">
+      <a href="#/gallery" data-view="gallery">Gallery</a>
+      <a href="#/list" data-view="list">List</a>
+      <a href="#/stats" data-view="stats">Stats</a>
+    </nav>
+    <button class="icon-btn theme-btn" id="theme-btn" type="button" aria-label="Switch to light theme" title="Switch theme">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg>
+    </button>
+  </header>
+
+  <form class="filters" id="filters" role="search" onsubmit="return false">
+    <label class="search">
+      <span class="sr-only">Search</span>
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m15.5 15.5 5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <input id="f-q" type="search" placeholder="Search artist, title, label, track" autocomplete="off" enterkeyhint="search">
+    </label>
+    <label><span class="sr-only">Genre</span><select id="f-genre"><option value="">All genres</option></select></label>
+    <label><span class="sr-only">Decade</span><select id="f-decade"><option value="">All decades</option></select></label>
+    <label><span class="sr-only">Format</span><select id="f-format"><option value="">All formats</option></select></label>
+    <label><span class="sr-only">Sort</span>
+      <select id="f-sort">
+        <option value="added">Recently added</option>
+        <option value="artist">Artist A–Z</option>
+        <option value="title">Title A–Z</option>
+        <option value="year">Oldest first</option>
+        <option value="-year">Newest first</option>
+      </select>
+    </label>
+    <button type="button" class="text-btn" id="f-clear" hidden>Clear filters</button>
+  </form>
+
+  <main id="view" tabindex="-1"></main>
+
+  <dialog class="sheet" id="detail" aria-labelledby="d-title"></dialog>
+
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

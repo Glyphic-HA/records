@@ -1,0 +1,692 @@
+/* Records: a small no-build frontend. Views: gallery (crate flip), list, stats; detail sheet. */
+"use strict";
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const fmtInt = (n) => n.toLocaleString();
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
+};
+
+const state = {
+  records: [], byUid: new Map(), filtered: [], meta: {},
+  view: "gallery", f: { q: "", genre: "", decade: "", format: "", sort: "added" },
+  galleryUid: null, listLimit: 150, loaded: false, error: null,
+};
+
+// ------------------------------------------------------------------ helpers
+const decadeOf = (r) => (r.year ? Math.floor(r.year / 10) * 10 : null);
+const sortName = (s) => (s || "").replace(/^(the|a|an)\s+/i, "").trim();
+const firstLetter = (s) => { const c = sortName(s).charAt(0).toUpperCase(); return /[A-Z]/.test(c) ? c : "#"; };
+
+function sleeveColor(id) {
+  // Muted, stable color per release for records without cover art.
+  const h = (id * 2654435761) % 360;
+  return `hsl(${h} 22% 34%)`;
+}
+
+function sleeve(r, { thumb = false, side = "front", eager = false } = {}) {
+  const src = `/img/${r.id}/${side}${thumb ? "?size=thumb" : ""}`;
+  return `<div class="sleeve has-img" style="--sleeve:${sleeveColor(r.id)}">
+    <div class="plain" aria-hidden="true"><b>${esc(r.title)}</b><span>${esc(r.artist)}</span></div>
+    <img src="${src}" alt="" ${eager ? "" : 'loading="lazy"'} decoding="async" draggable="false">
+  </div>`;
+}
+// Missing cover -> show the plain sleeve instead of a broken image.
+document.addEventListener("error", (e) => {
+  if (e.target.tagName === "IMG" && e.target.parentElement?.classList.contains("sleeve")) {
+    e.target.parentElement.classList.remove("has-img");
+  }
+}, true);
+
+function factsLine(r) {
+  return [r.year, r.label, r.format_detail || r.format].filter(Boolean).map(esc).join(", ");
+}
+
+// ------------------------------------------------------------------ routing
+function parseHash() {
+  const [path, query = ""] = location.hash.replace(/^#\/?/, "").split("?");
+  const p = new URLSearchParams(query);
+  return { view: ["gallery", "list", "stats"].includes(path) ? path : "gallery", p };
+}
+
+function hashFor(view, extra = {}) {
+  const p = new URLSearchParams();
+  const f = { ...state.f, ...extra };
+  for (const k of ["q", "genre", "decade", "format"]) if (f[k]) p.set(k, f[k]);
+  if (f.sort && f.sort !== "added") p.set("sort", f.sort);
+  if (extra.r) p.set("r", extra.r);
+  const qs = p.toString();
+  return `#/${view}${qs ? "?" + qs : ""}`;
+}
+
+function syncUrl({ push = false, r } = {}) {
+  const h = hashFor(state.view, r ? { r } : {});
+  if (h === location.hash) return;
+  history[push ? "pushState" : "replaceState"](null, "", h);
+}
+
+function readRoute() {
+  const { view, p } = parseHash();
+  state.view = view;
+  state.f = {
+    q: p.get("q") || "", genre: p.get("genre") || "", decade: p.get("decade") || "",
+    format: p.get("format") || "", sort: p.get("sort") || "added",
+  };
+  return p.get("r");
+}
+
+// ------------------------------------------------------------------ filters
+function applyFilters() {
+  const { q, genre, decade, format, sort } = state.f;
+  const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+  let out = state.records.filter((r) => {
+    if (genre && !r.genres.includes(genre)) return false;
+    if (format && r.format !== format) return false;
+    if (decade) {
+      const d = decadeOf(r);
+      if (decade === "none" ? d !== null : String(d) !== decade) return false;
+    }
+    return terms.every((t) => r._hay.includes(t));
+  });
+  const by = {
+    added: (a, b) => (b.date_added || "").localeCompare(a.date_added || ""),
+    artist: (a, b) => sortName(a.artist).localeCompare(sortName(b.artist), undefined, { sensitivity: "base" }) || (a.year || 0) - (b.year || 0),
+    title: (a, b) => sortName(a.title).localeCompare(sortName(b.title), undefined, { sensitivity: "base" }),
+    year: (a, b) => (a.year || 9999) - (b.year || 9999) || sortName(a.artist).localeCompare(sortName(b.artist)),
+    "-year": (a, b) => (b.year || 0) - (a.year || 0) || sortName(a.artist).localeCompare(sortName(b.artist)),
+  }[sort] || ((a, b) => 0);
+  state.filtered = out.sort(by);
+}
+
+function fillSelect(sel, values, label, current) {
+  sel.innerHTML = `<option value="">${label}</option>` +
+    values.map(([v, text, n]) => `<option value="${esc(v)}">${esc(text)} (${n})</option>`).join("");
+  sel.value = current;
+}
+
+function countBy(list, keyFn) {
+  const m = new Map();
+  for (const r of list) for (const k of [].concat(keyFn(r))) if (k !== undefined && k !== "") m.set(k, (m.get(k) || 0) + 1);
+  return m;
+}
+
+function populateFilters() {
+  const genres = [...countBy(state.records, (r) => r.genres)].sort((a, b) => b[1] - a[1]);
+  fillSelect($("#f-genre"), genres.map(([g, n]) => [g, g, n]), "All genres", state.f.genre);
+  const decades = [...countBy(state.records, (r) => decadeOf(r) ?? "none")]
+    .sort((a, b) => (a[0] === "none") - (b[0] === "none") || a[0] - b[0]);
+  fillSelect($("#f-decade"), decades.map(([d, n]) => [String(d), d === "none" ? "Year unknown" : `${d}s`, n]), "All decades", state.f.decade);
+  const formats = [...countBy(state.records, (r) => r.format)].sort((a, b) => b[1] - a[1]);
+  fillSelect($("#f-format"), formats.map(([f, n]) => [f, f, n]), "All formats", state.f.format);
+  $("#f-format").parentElement.hidden = formats.length < 2;
+}
+
+function reflectFilters() {
+  $("#f-q").value = state.f.q;
+  for (const k of ["genre", "decade", "format", "sort"]) $(`#f-${k}`).value = state.f[k];
+  $("#f-clear").hidden = !(state.f.q || state.f.genre || state.f.decade || state.f.format);
+}
+
+function bindFilters() {
+  let t;
+  $("#f-q").addEventListener("input", (e) => {
+    clearTimeout(t);
+    t = setTimeout(() => { state.f.q = e.target.value.trim(); onFiltersChanged(); }, 140);
+  });
+  for (const k of ["genre", "decade", "format", "sort"]) {
+    $(`#f-${k}`).addEventListener("change", (e) => { state.f[k] = e.target.value; onFiltersChanged(); });
+  }
+  $("#f-clear").addEventListener("click", () => {
+    Object.assign(state.f, { q: "", genre: "", decade: "", format: "" });
+    onFiltersChanged();
+  });
+}
+
+function onFiltersChanged() {
+  state.galleryUid = null;
+  state.listLimit = 150;
+  syncUrl();
+  reflectFilters();
+  applyFilters();
+  render();
+}
+
+// ------------------------------------------------------------------ render
+function render() {
+  $$(".tabs a").forEach((a) => { if (a.dataset.view === state.view) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
+  $$(".tabs a").forEach((a) => { a.href = hashFor(a.dataset.view); });
+  const n = state.records.length;
+  $("#total-count").textContent = state.loaded ? `${fmtInt(n)} record${n === 1 ? "" : "s"}` : "";
+  document.title = { gallery: "Records", list: "Records: list", stats: "Records: stats" }[state.view];
+  gallery.teardown();
+  const main = $("#view");
+  if (state.error) return void (main.innerHTML = emptyState("Couldn't load the collection", state.error));
+  if (!state.loaded) return void (main.innerHTML = `<p class="empty">Loading…</p>`);
+  if (!state.records.length) {
+    return void (main.innerHTML = emptyState("No records yet",
+      "Run <code>python -m app.sync</code> on the server to pull your collection from Discogs, then reload this page."));
+  }
+  if (!state.filtered.length && state.view !== "stats") {
+    return void (main.innerHTML = emptyState("Nothing matches those filters",
+      `Try a different search, or <a href="${hashFor(state.view, { q: "", genre: "", decade: "", format: "" })}">clear the filters</a>.`));
+  }
+  ({ gallery: renderGallery, list: renderList, stats: renderStats })[state.view](main);
+}
+
+function emptyState(title, body) {
+  return `<div class="empty"><h2>${esc(title)}</h2><p>${body}</p></div>`;
+}
+
+// ------------------------------------------------------------------ gallery
+const gallery = {
+  pos: 0, target: 0, raf: 0, slots: new Map(), el: null, cleanup: [],
+  teardown() {
+    cancelAnimationFrame(this.raf); this.raf = 0;
+    this.cleanup.forEach((fn) => fn()); this.cleanup = [];
+    this.slots.clear(); this.el = null;
+  },
+};
+
+function renderGallery(main) {
+  const list = state.filtered;
+  let start = Math.max(0, list.findIndex((r) => r.uid === state.galleryUid));
+  main.innerHTML = `
+    <section class="crate-wrap" aria-label="Gallery">
+      <div class="crate" id="crate" tabindex="0" role="listbox" aria-label="Records, use left and right arrow keys to flip"></div>
+      <div class="now-playing" aria-live="polite"><h2 id="np-title"></h2><p id="np-artist"></p><p class="facts" id="np-facts"></p></div>
+      <div class="scrub">
+        <button class="step-btn" type="button" id="g-prev" aria-label="Previous record"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+        <input type="range" id="g-range" min="0" max="${list.length - 1}" value="${start}" aria-label="Position in crate">
+        <button class="step-btn" type="button" id="g-next" aria-label="Next record"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+        <output id="g-pos" class="num"></output>
+      </div>
+      <p class="hint">Drag, scroll or use the arrow keys to flip. Click the front record for details.</p>
+    </section>`;
+  const crate = $("#crate");
+  gallery.el = crate;
+  gallery.pos = gallery.target = start;
+  let lastShown = -1;
+
+  const sizeOf = () => crate.querySelector(".slot")?.offsetWidth || crate.offsetHeight - 64;
+
+  function layout() {
+    const S = sizeOf();
+    const from = Math.max(0, Math.floor(gallery.pos) - 8), to = Math.min(list.length - 1, Math.ceil(gallery.pos) + 8);
+    for (const [i, el] of gallery.slots) if (i < from || i > to) { el.remove(); gallery.slots.delete(i); }
+    for (let i = from; i <= to; i++) {
+      let el = gallery.slots.get(i);
+      if (!el) {
+        el = document.createElement("button");
+        el.type = "button"; el.className = "slot"; el.dataset.i = i; el.tabIndex = -1;
+        el.setAttribute("aria-label", `${list[i].artist}, ${list[i].title}`);
+        el.innerHTML = sleeve(list[i], { eager: Math.abs(i - gallery.pos) < 3 }) + `<span class="shade"></span>`;
+        crate.appendChild(el);
+        gallery.slots.set(i, el);
+      }
+      const d = i - gallery.pos, a = Math.abs(d), s = Math.sign(d);
+      const near = Math.min(a, 1), far = Math.max(a - 1, 0);
+      const x = s * (near * S * 0.6 + far * S * 0.16);
+      const rot = -s * near * 62;
+      const z = -near * S * 0.32 - far * 6;
+      el.style.transform = `translate3d(${x}px,0,${z}px) rotateY(${rot}deg)`;
+      el.style.zIndex = String(1000 - Math.round(a * 10));
+      el.querySelector(".shade").style.opacity = String(Math.min(near * 0.28 + far * 0.06, 0.65));
+      el.classList.toggle("center", i === gallery.target);
+    }
+    const shown = Math.round(gallery.pos);
+    if (shown !== lastShown) { lastShown = shown; describe(shown); }
+  }
+
+  function describe(i) {
+    const r = list[i];
+    if (!r) return;
+    state.galleryUid = r.uid;
+    $("#np-title").textContent = r.title;
+    $("#np-artist").textContent = r.artist;
+    $("#np-facts").innerHTML = factsLine(r);
+    $("#g-range").value = i;
+    $("#g-pos").textContent = `${fmtInt(i + 1)} of ${fmtInt(list.length)}`;
+    crate.setAttribute("aria-activedescendant", "");
+  }
+
+  function animate() {
+    const diff = gallery.target - gallery.pos;
+    if (reduceMotion || Math.abs(diff) < 0.002) gallery.pos = gallery.target;
+    else gallery.pos += diff * 0.16;
+    layout();
+    gallery.raf = gallery.pos === gallery.target ? 0 : requestAnimationFrame(animate);
+  }
+  function go(i) {
+    gallery.target = Math.max(0, Math.min(list.length - 1, Math.round(i)));
+    if (!gallery.raf) gallery.raf = requestAnimationFrame(animate);
+  }
+
+  // pointer drag / swipe
+  let drag = null, moved = false;
+  crate.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    drag = { x: e.clientX, pos: gallery.pos, t: performance.now(), v: 0, lx: e.clientX, lt: performance.now() };
+    moved = false;
+  });
+  const onMove = (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x;
+    if (!moved && Math.abs(dx) < 6) return;
+    if (!moved) { moved = true; crate.setPointerCapture?.(e.pointerId); crate.classList.add("dragging"); }
+    const now = performance.now();
+    drag.v = (e.clientX - drag.lx) / Math.max(1, now - drag.lt);
+    drag.lx = e.clientX; drag.lt = now;
+    cancelAnimationFrame(gallery.raf); gallery.raf = 0;
+    gallery.pos = Math.max(-0.4, Math.min(list.length - 0.6, drag.pos - dx / (sizeOf() * 0.3)));
+    gallery.target = Math.round(gallery.pos);
+    layout();
+  };
+  const onUp = () => {
+    if (!drag) return;
+    crate.classList.remove("dragging");
+    if (moved) go(gallery.pos - drag.v * 4);
+    drag = null;
+  };
+  crate.addEventListener("pointermove", onMove);
+  crate.addEventListener("pointerup", onUp);
+  crate.addEventListener("pointercancel", onUp);
+  crate.addEventListener("click", (e) => {
+    if (moved) { moved = false; return; }
+    const slot = e.target.closest(".slot");
+    if (!slot) return;
+    const i = +slot.dataset.i;
+    if (i === gallery.target) openDetail(list[i].uid, list);
+    else go(i);
+  });
+
+  // wheel: trackpads send many small deltas; step once per ~50px
+  let acc = 0, wheelT = 0;
+  crate.addEventListener("wheel", (e) => {
+    const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    e.preventDefault();
+    acc += d;
+    const now = performance.now();
+    if (Math.abs(acc) >= 50 || (Math.abs(d) >= 50 && now - wheelT > 60)) {
+      go(gallery.target + Math.sign(acc));
+      acc = 0; wheelT = now;
+    }
+  }, { passive: false });
+
+  const onKey = (e) => {
+    if ($("#detail").open || e.target.matches("input, select, textarea")) return;
+    const k = { ArrowRight: 1, ArrowLeft: -1, PageDown: 10, PageUp: -10 }[e.key];
+    if (k) { e.preventDefault(); go(gallery.target + k); }
+    else if (e.key === "Home") go(0);
+    else if (e.key === "End") go(list.length - 1);
+    else if (e.key === "Enter" && document.activeElement === crate) openDetail(list[gallery.target].uid, list);
+  };
+  document.addEventListener("keydown", onKey);
+  const onResize = () => layout();
+  addEventListener("resize", onResize);
+  gallery.cleanup.push(() => { document.removeEventListener("keydown", onKey); removeEventListener("resize", onResize); });
+
+  $("#g-prev").onclick = () => go(gallery.target - 1);
+  $("#g-next").onclick = () => go(gallery.target + 1);
+  $("#g-range").addEventListener("input", (e) => go(+e.target.value));
+
+  layout();
+  requestAnimationFrame(layout); // after layout pass gives the real slot size
+}
+
+// ------------------------------------------------------------------ list
+function renderList(main) {
+  const list = state.filtered;
+  const s = state.f.sort;
+  const ariaSort = (key) => (s === key ? "ascending" : s === "-" + key ? "descending" : "none");
+  const divided = s === "artist" || s === "title";
+  let html = `<section class="list" aria-label="List">
+    <div class="list-head" role="row">
+      <span></span>
+      <button type="button" data-sort="title" aria-sort="${ariaSort("title")}">Title</button>
+      <button type="button" data-sort="artist" aria-sort="${ariaSort("artist")}">Artist</button>
+      <button type="button" data-sort="year" aria-sort="${s === "year" ? "ascending" : s === "-year" ? "descending" : "none"}">Year</button>
+      <span>Label</span><span>Genre</span><span>Bin</span>
+    </div><div id="rows">`;
+  let lastLetter = null;
+  const shown = list.slice(0, state.listLimit);
+  for (const r of shown) {
+    if (divided) {
+      const L = firstLetter(s === "artist" ? r.artist : r.title);
+      if (L !== lastLetter) { html += `<h2 class="divider" aria-label="${L}">${L}</h2>`; lastLetter = L; }
+    }
+    html += `<button type="button" class="row" data-uid="${esc(r.uid)}">
+      ${sleeve(r, { thumb: true })}
+      <span class="t">${esc(r.title)}</span>
+      <span class="a">${esc(r.artist)}</span>
+      <span class="y">${r.year || ""}</span>
+      <span class="l">${esc(r.label)}</span>
+      <span class="g">${esc(r.genres[0] || "")}</span>
+      <span class="b">${esc(r.bin)}</span>
+    </button>`;
+  }
+  html += `</div>`;
+  if (list.length > shown.length) {
+    html += `<button type="button" class="btn list-more" id="more">Show ${fmtInt(Math.min(300, list.length - shown.length))} more (${fmtInt(list.length - shown.length)} left)</button>`;
+  }
+  html += `</section>`;
+  main.innerHTML = html;
+
+  main.querySelector(".list").addEventListener("click", (e) => {
+    const row = e.target.closest(".row");
+    if (row) return openDetail(row.dataset.uid, list);
+    const h = e.target.closest("[data-sort]");
+    if (h) {
+      const k = h.dataset.sort;
+      state.f.sort = k === "year" ? (s === "year" ? "-year" : "year") : k;
+      onFiltersChanged();
+    }
+  });
+  const more = $("#more");
+  if (more) {
+    more.onclick = () => { const y = scrollY; state.listLimit += 300; render(); scrollTo(0, y); };
+    if ("IntersectionObserver" in window) {
+      const io = new IntersectionObserver((ents) => { if (ents[0].isIntersecting) { io.disconnect(); more.click(); } }, { rootMargin: "600px" });
+      io.observe(more);
+    }
+  }
+}
+
+// ------------------------------------------------------------------ stats
+function renderStats(main) {
+  const list = state.filtered;
+  if (!list.length) { main.innerHTML = emptyState("Nothing to chart", "No records match the current filters."); return; }
+  const artists = countBy(list, (r) => r.artist);
+  const years = list.map((r) => r.year).filter(Boolean);
+  const oldest = list.filter((r) => r.year).sort((a, b) => a.year - b.year)[0];
+  const dated = list.filter((r) => r.date_added).sort((a, b) => a.date_added.localeCompare(b.date_added));
+  const firstAdded = dated[0]?.date_added?.slice(0, 4);
+  const filteredNote = list.length !== state.records.length ? ` (filtered from ${fmtInt(state.records.length)})` : "";
+
+  const genres = [...countBy(list, (r) => r.genres[0] || "Unknown")].sort((a, b) => b[1] - a[1]);
+  const decades = [...countBy(list, (r) => decadeOf(r) ?? "none")].filter(([d]) => d !== "none").sort((a, b) => a[0] - b[0]);
+  const undated = list.filter((r) => !r.year).length;
+  const topArtists = [...artists].filter(([a]) => !/^various/i.test(a)).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 12);
+  const topLabels = [...countBy(list, (r) => r.label)].filter(([l]) => l && !/^not on label/i.test(l)).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 12);
+
+  main.innerHTML = `<section class="stats" aria-label="Stats">
+    <div class="wide headline">
+      <p><strong>${fmtInt(list.length)} records</strong>${filteredNote} by <strong>${fmtInt(artists.size)} artists</strong>${firstAdded ? `, collected since ${firstAdded}` : ""}.
+      ${oldest ? `The oldest pressing is <a href="#" data-open="${esc(oldest.uid)}">${esc(oldest.title)}</a> by ${esc(oldest.artist)} (${oldest.year}).` : ""}
+      ${years.length ? `Median release year: ${median(years)}.` : ""}</p>
+    </div>
+    <div class="wide">${growthChart(dated)}</div>
+    <div>${barList("By genre", "Primary Discogs genre. Select a bar to list those records.", genres, (g) => hashFor("list", { genre: g === "Unknown" ? "" : g, q: "" }))}</div>
+    <div>${columns("By decade", `Release decade${undated ? `; ${fmtInt(undated)} without a year aren't shown` : ""}.`, decades, (d) => hashFor("list", { decade: String(d) }))}</div>
+    <div>${barList("Most collected artists", "Excludes Various Artists compilations.", topArtists, (a) => hashFor("list", { q: a, genre: "", decade: "" , sort: "year" }))}</div>
+    <div>${barList("Most collected labels", "First label credited on each release.", topLabels, (l) => hashFor("list", { q: l, genre: "", decade: "" }))}</div>
+  </section>`;
+  main.querySelectorAll("[data-open]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); openDetail(a.dataset.open, list); }));
+  wireGrowth(main, dated);
+}
+
+const median = (a) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+
+function tableOf(rows, h1, h2) {
+  return `<details><summary>Show as table</summary><table><thead><tr><th>${h1}</th><th>${h2}</th></tr></thead><tbody>${
+    rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${fmtInt(v)}</td></tr>`).join("")}</tbody></table></details>`;
+}
+
+function barList(title, sub, rows, hrefFor) {
+  const max = Math.max(...rows.map((r) => r[1]), 1);
+  return `<h2>${esc(title)}</h2><p class="sub">${esc(sub)}</p><div class="bars">${rows.map(([k, v]) => `
+    <a class="bar-row" href="${hrefFor(k)}" title="${esc(k)}: ${fmtInt(v)}">
+      <span class="name">${esc(k)}</span>
+      <span class="track"><span class="fill" style="width:calc((100% - 4ch) * ${v / max})"></span><span class="val">${fmtInt(v)}</span></span>
+    </a>`).join("")}</div>${tableOf(rows, "Name", "Records")}`;
+}
+
+function columns(title, sub, rows, hrefFor) {
+  const max = Math.max(...rows.map((r) => r[1]), 1);
+  return `<h2>${esc(title)}</h2><p class="sub">${esc(sub)}</p>
+    <div class="cols">${rows.map(([d, v]) => `
+      <a class="col" href="${hrefFor(d)}" title="${d}s: ${fmtInt(v)}"><span class="val">${fmtInt(v)}</span><span class="fill" style="height:calc((100% - 22px) * ${v / max})"></span></a>`).join("")}</div>
+    <div class="col-labels">${rows.map(([d]) => `<span>${String(d).slice(2)}s</span>`).join("")}</div>
+    ${tableOf(rows.map(([d, v]) => [`${d}s`, v]), "Decade", "Records")}`;
+}
+
+function growthSeries(dated) {
+  // cumulative count at the end of each month
+  const months = new Map();
+  for (const r of dated) { const m = r.date_added.slice(0, 7); months.set(m, (months.get(m) || 0) + 1); }
+  const keys = [...months.keys()].sort();
+  if (!keys.length) return [];
+  const out = [];
+  let [y, m] = keys[0].split("-").map(Number), total = 0;
+  const [ey, em] = keys[keys.length - 1].split("-").map(Number);
+  while (y < ey || (y === ey && m <= em)) {
+    const k = `${y}-${String(m).padStart(2, "0")}`;
+    total += months.get(k) || 0;
+    out.push({ k, total, added: months.get(k) || 0, t: y + (m - 1) / 12 });
+    if (++m > 12) { m = 1; y++; }
+  }
+  return out;
+}
+
+function growthChart(dated) {
+  const s = growthSeries(dated);
+  if (s.length < 2) return "";
+  return `<h2>Collection over time</h2><p class="sub">Records in the collection, by the month they were added to Discogs.</p>
+    <div class="growth" id="growth"></div>
+    ${tableOf(s.filter((p) => p.k.endsWith("-12") || p === s[s.length - 1]).map((p) => [p.k.slice(0, 4), p.total]), "End of", "Records")}`;
+}
+
+function wireGrowth(main, dated) {
+  const box = $("#growth", main);
+  if (!box) return;
+  const s = growthSeries(dated);
+  const draw = () => {
+    const W = box.clientWidth, H = 260, L = 44, R = 64, T = 12, B = 28;
+    const x0 = s[0].t, x1 = s[s.length - 1].t, ymax = niceMax(s[s.length - 1].total);
+    const X = (t) => L + ((t - x0) / (x1 - x0 || 1)) * (W - L - R);
+    const Y = (v) => T + (1 - v / ymax) * (H - T - B);
+    const ticks = [0, ymax / 4, ymax / 2, (3 * ymax) / 4, ymax];
+    const yearStep = Math.max(1, Math.ceil((x1 - x0) / Math.max(2, Math.floor((W - L - R) / 70))));
+    const years = [];
+    for (let yv = Math.ceil(x0); yv <= x1; yv += yearStep) years.push(yv);
+    const pts = s.map((p) => `${X(p.t).toFixed(1)},${Y(p.total).toFixed(1)}`);
+    const last = s[s.length - 1];
+    box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Collection size over time, reaching ${last.total} records">
+      <g class="grid">${ticks.map((v) => `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/>`).join("")}</g>
+      <g class="axis">${ticks.map((v) => `<text x="${L - 8}" y="${Y(v) + 4}" text-anchor="end">${compact(v)}</text>`).join("")}
+        ${years.map((yv) => `<text x="${X(yv)}" y="${H - 6}" text-anchor="middle">${yv}</text>`).join("")}</g>
+      <path class="area" d="M${pts[0]} L${pts.join(" L")} L${X(last.t)},${Y(0)} L${X(s[0].t)},${Y(0)} Z"/>
+      <path class="line" d="M${pts.join(" L")}"/>
+      <g class="end"><circle class="dot" cx="${X(last.t)}" cy="${Y(last.total)}" r="4.5"/><text x="${X(last.t) + 10}" y="${Y(last.total) + 4}">${fmtInt(last.total)}</text></g>
+      <g class="hover" visibility="hidden"><line class="cross" y1="${T}" y2="${H - B}"/><circle class="dot" r="4.5"/></g>
+      <rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent" class="hit"/>
+    </svg><div class="tip" hidden></div>`;
+    const hover = $(".hover", box), tip = $(".tip", box), hit = $(".hit", box);
+    const monthName = (k) => new Date(k + "-01T12:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" });
+    hit.addEventListener("pointermove", (e) => {
+      const rect = box.getBoundingClientRect();
+      const t = x0 + ((e.clientX - rect.left - L) / (W - L - R)) * (x1 - x0);
+      const p = s.reduce((a, b) => (Math.abs(b.t - t) < Math.abs(a.t - t) ? b : a));
+      const cx = X(p.t), cy = Y(p.total);
+      hover.setAttribute("visibility", "visible");
+      hover.querySelector("line").setAttribute("x1", cx); hover.querySelector("line").setAttribute("x2", cx);
+      hover.querySelector("circle").setAttribute("cx", cx); hover.querySelector("circle").setAttribute("cy", cy);
+      tip.hidden = false;
+      tip.style.left = `${cx}px`; tip.style.top = `${cy}px`;
+      tip.innerHTML = `${monthName(p.k)}: <b>${fmtInt(p.total)}</b> records${p.added ? `, +${p.added} that month` : ""}`;
+    });
+    hit.addEventListener("pointerleave", () => { hover.setAttribute("visibility", "hidden"); tip.hidden = true; });
+  };
+  draw();
+  const ro = new ResizeObserver(() => draw());
+  ro.observe(box);
+  gallery.cleanup.push(() => ro.disconnect());
+}
+const niceMax = (v) => {
+  const p = 10 ** Math.floor(Math.log10(v || 1));
+  return [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].map((m) => m * p).find((c) => c >= v) || 1;
+};
+const compact = (v) => (v >= 1000 ? `${+(v / 1000).toFixed(1)}K` : String(Math.round(v)));
+
+// ------------------------------------------------------------------ detail
+let detailList = [];
+
+function openDetail(uid, list = state.filtered) {
+  const r = state.byUid.get(uid);
+  if (!r) return;
+  detailList = list;
+  const dlg = $("#detail");
+  const i = list.findIndex((x) => x.uid === uid);
+  const prev = list[i - 1], next = list[i + 1];
+  const added = r.date_added ? new Date(r.date_added).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }) : "";
+  const tracks = r.tracklist || [];
+  const discogs = `https://www.discogs.com/release/${r.id}`;
+  const fact = (k, v) => (v ? `<dt>${k}</dt><dd>${v}</dd>` : "");
+  dlg.innerHTML = `<div class="d-grid">
+    <div class="d-art">
+      <button type="button" class="flip" id="flip" ${r.has_back ? "" : "disabled"} aria-label="${r.has_back ? "Show back cover" : "Front cover"}">
+        <div class="flip-inner">
+          <div class="face front">${sleeve(r, { eager: true })}</div>
+          ${r.has_back ? `<div class="face back">${sleeve(r, { side: "back", eager: true })}</div>` : ""}
+        </div>
+      </button>
+      <div class="art-actions">${r.has_back ? `<button type="button" class="text-btn" id="flip-btn">Show back</button>` : "<span>No back cover on file</span>"}
+        <a class="text-btn" href="${discogs}" target="_blank" rel="noopener">View on Discogs</a></div>
+    </div>
+    <div class="d-body">
+      <div class="d-top">
+        <div><h2 class="d-title" id="d-title">${esc(r.title)}</h2>
+        <p class="d-artist"><a href="${hashFor("list", { q: r.artist, genre: "", decade: "", format: "", sort: "year" })}">${esc(r.artist)}</a></p></div>
+        <button type="button" class="icon-btn" id="d-close" aria-label="Close"><svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+      </div>
+      <dl class="facts-list">
+        ${fact("Released", esc([r.released && r.released !== String(r.year) ? r.released : r.year, r.country].filter(Boolean).join(", ")))}
+        ${fact("Label", r.label ? `<a href="${hashFor("list", { q: r.label, genre: "", decade: "", format: "" })}">${esc(r.label)}</a>${r.catno ? ` <span class="num">${esc(r.catno)}</span>` : ""}` : "")}
+        ${fact("Format", esc([r.format, r.format_detail].filter(Boolean).join(", ")))}
+        ${fact("Genre", r.genres.length ? `<span class="chips">${r.genres.map((g) => `<a class="chip" href="${hashFor("list", { genre: g, q: "", decade: "" })}">${esc(g)}</a>`).join("")}</span>` : "")}
+        ${fact("Style", esc(r.styles.join(", ")))}
+        ${fact("Added", esc(added))}
+        <dt><label for="d-bin">Bin</label></dt>
+        <dd class="bin-field"><input id="d-bin" value="${esc(r.bin)}" maxlength="40" placeholder="—" autocomplete="off" ${state.meta.can_edit ? "" : "disabled"}><small id="d-bin-msg">${state.meta.can_edit ? "Where it lives on the shelf" : ""}</small></dd>
+      </dl>
+      <div class="tracks"><h3>Tracklist</h3>${tracks.length
+        ? `<ol>${tracks.map((t, n) => `<li><span class="pos">${esc(t.position || n + 1)}</span><span>${esc(t.title)}</span><span class="dur">${esc(t.duration)}</span></li>`).join("")}</ol>`
+        : `<p class="none">No tracklist yet. It's filled in by the next Discogs sync.</p>`}</div>
+      <div class="d-nav">
+        <button type="button" class="btn" id="d-prev" ${prev ? "" : "disabled"}>Previous</button>
+        <button type="button" class="btn" id="d-next" ${next ? "" : "disabled"}>Next</button>
+      </div>
+    </div>
+  </div>`;
+  if (!dlg.open) dlg.showModal();
+  dlg.scrollTop = 0;
+  syncUrl({ r: uid });
+
+  const flip = () => { const f = $("#flip"); f.classList.toggle("flipped"); const b = $("#flip-btn"); if (b) b.textContent = f.classList.contains("flipped") ? "Show front" : "Show back"; };
+  if (r.has_back) { $("#flip").onclick = flip; $("#flip-btn").onclick = flip; }
+  $("#d-close").onclick = closeDetail;
+  if (prev) $("#d-prev").onclick = () => step(prev);
+  if (next) $("#d-next").onclick = () => step(next);
+  const bin = $("#d-bin");
+  const saveBin = async () => {
+    const v = bin.value.trim();
+    if (v === r.bin) return;
+    $("#d-bin-msg").textContent = "Saving…";
+    try {
+      const res = await fetch(`/api/bins/${r.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bin: v }) });
+      if (!res.ok) throw new Error(res.status === 403 ? "Editing is locked on this server" : `Server answered ${res.status}`);
+      const out = await res.json();
+      for (const x of state.records) if (x.id === r.id) x.bin = out.bin;
+      $("#d-bin-msg").textContent = "Saved";
+    } catch (err) {
+      $("#d-bin-msg").textContent = `Not saved: ${err.message}`;
+    }
+  };
+  bin.addEventListener("change", saveBin);
+  bin.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); bin.blur(); } });
+
+  function step(target) {
+    openDetail(target.uid, detailList);
+    if (state.view === "gallery" && gallery.el) { state.galleryUid = target.uid; }
+  }
+}
+
+function closeDetail() {
+  const dlg = $("#detail");
+  if (dlg.open) dlg.close();
+}
+
+function bindDetail() {
+  const dlg = $("#detail");
+  dlg.addEventListener("close", () => {
+    syncUrl();
+    if (state.view === "gallery" && state.galleryUid) render(); // land the crate on the last viewed record
+  });
+  dlg.addEventListener("click", (e) => { if (e.target === dlg) closeDetail(); }); // backdrop
+  document.addEventListener("keydown", (e) => {
+    if (!dlg.open || e.target.matches("input")) return;
+    if (e.key === "ArrowRight") $("#d-next")?.click();
+    if (e.key === "ArrowLeft") $("#d-prev")?.click();
+  });
+}
+
+// ------------------------------------------------------------------ theme
+function bindTheme() {
+  const btn = $("#theme-btn");
+  const effective = () => document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  const label = () => {
+    const other = effective() === "dark" ? "light" : "dark";
+    btn.setAttribute("aria-label", `Switch to ${other} theme`);
+    btn.title = `Switch to ${other} theme`;
+    $('meta[name="theme-color"]').content = effective() === "dark" ? "#16191d" : "#e9ecee";
+  };
+  btn.addEventListener("click", () => {
+    const next = effective() === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    store.set("rc-theme", next);
+    label();
+  });
+  label();
+}
+
+// ------------------------------------------------------------------ boot
+async function load() {
+  try {
+    const res = await fetch("/api/collection", { cache: "no-cache" });
+    if (!res.ok) throw new Error(`The server answered ${res.status}. Check the service log on the Pi.`);
+    const data = await res.json();
+    state.meta = data;
+    state.records = (data.records || []).map((r) => ({
+      ...r,
+      _hay: [r.title, r.artist, r.label, r.catno, ...(r.styles || []), ...(r.tracklist || []).map((t) => t.title)].join(" ").toLowerCase(),
+    }));
+    state.byUid = new Map(state.records.map((r) => [r.uid, r]));
+  } catch (err) {
+    state.error = err instanceof TypeError ? "The server couldn't be reached. Is the record-collection service running?" : esc(err.message);
+  }
+  state.loaded = true;
+}
+
+function onRoute() {
+  const r = readRoute();
+  reflectFilters();
+  applyFilters();
+  render();
+  if (r && state.byUid.has(r)) openDetail(r);
+  else if ($("#detail").open) $("#detail").close();
+}
+
+(async function main() {
+  bindTheme();
+  bindFilters();
+  bindDetail();
+  readRoute();
+  render();
+  await load();
+  populateFilters();
+  addEventListener("hashchange", onRoute);
+  onRoute();
+})();
