@@ -79,3 +79,25 @@ def set_bin(release_id: int, value: str) -> dict[str, str]:
 
 
 _bins_lock = threading.Lock()
+
+
+def load_backs() -> dict[str, int]:
+    """Which Discogs photo the user picked as each release's back cover: {release_id: photo_index}."""
+    data = read_json(config.BACKS_PATH, {})
+    out = {}
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if isinstance(v, int) and v > 0:
+                out[str(k)] = v
+    return out
+
+
+def set_back(release_id: int, photo: int | None) -> dict[str, int]:
+    with _bins_lock:
+        backs = dict(load_backs())
+        if photo:
+            backs[str(release_id)] = int(photo)
+        else:
+            backs.pop(str(release_id), None)
+        write_json(config.BACKS_PATH, backs)
+        return backs

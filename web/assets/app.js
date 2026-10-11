@@ -28,8 +28,8 @@ function sleeveColor(id) {
   return `hsl(${h} 22% 34%)`;
 }
 
-function sleeve(r, { thumb = false, side = "front", eager = false } = {}) {
-  const src = `/img/${r.id}/${side}${thumb ? "?size=thumb" : ""}`;
+function sleeve(r, { thumb = false, photo = 0, eager = false } = {}) {
+  const src = `/img/${r.id}/${photo === 0 ? "front" : photo}${thumb ? "?size=thumb" : ""}`;
   return `<div class="sleeve has-img" style="--sleeve:${sleeveColor(r.id)}">
     <div class="plain" aria-hidden="true"><b>${esc(r.title)}</b><span>${esc(r.artist)}</span></div>
     <img src="${src}" alt="" ${eager ? "" : 'loading="lazy"'} decoding="async" draggable="false">
@@ -37,9 +37,9 @@ function sleeve(r, { thumb = false, side = "front", eager = false } = {}) {
 }
 // Missing cover -> show the plain sleeve instead of a broken image.
 document.addEventListener("error", (e) => {
-  if (e.target.tagName === "IMG" && e.target.parentElement?.classList.contains("sleeve")) {
-    e.target.parentElement.classList.remove("has-img");
-  }
+  if (e.target.tagName !== "IMG") return;
+  if (e.target.closest(".thumb")) e.target.closest(".thumb").classList.add("broken");
+  else if (e.target.parentElement?.classList.contains("sleeve")) e.target.parentElement.classList.remove("has-img");
 }, true);
 
 function factsLine(r) {
@@ -534,6 +534,59 @@ const compact = (v) => (v >= 1000 ? `${+(v / 1000).toFixed(1)}K` : String(Math.r
 // ------------------------------------------------------------------ detail
 let detailList = [];
 
+// The cover panel: main image, every Discogs photo as a strip, and the back-cover picker.
+// Discogs doesn't say which photo is the back, so the user picks it once and it's remembered.
+const art = { r: null, shown: 0, msg: "" };
+
+function paintArt(animate = true) {
+  const box = $("#d-art");
+  const r = art.r;
+  if (!box || !r) return;
+  const n = r.photos || 1, back = r.back, shown = art.shown;
+  const isBack = back != null && shown === back;
+  const what = shown === 0 ? "Front cover" : isBack ? "Back cover" : `Photo ${shown + 1} of ${n}`;
+  let flipControl;
+  if (back != null) flipControl = `<button type="button" class="text-btn" data-photo="${isBack ? 0 : back}">${isBack ? "Show front" : "Show back"}</button>`;
+  else flipControl = "";
+  let picker = "";
+  if (shown > 0 && state.meta.can_edit) {
+    picker = isBack
+      ? `<p class="pick">Marked as the back cover. <button type="button" class="text-btn" data-back="clear">Undo</button></p>`
+      : `<p class="pick"><button type="button" class="btn" data-back="${shown}">Use as back cover</button></p>`;
+  } else if (shown === 0 && back == null && n > 1 && state.meta.can_edit) {
+    picker = `<p class="pick hint-text">Discogs doesn't label which photo is the back. Tap it in the photos above, then choose “Use as back cover”.</p>`;
+  }
+  box.innerHTML = `
+    <button type="button" class="viewer ${animate ? "turn" : ""}" ${back != null ? `data-photo="${isBack ? 0 : back}"` : "disabled"}
+      aria-label="${what}${back != null ? (isBack ? ", show front" : ", show back") : ""}">${sleeve(r, { photo: shown, eager: true })}</button>
+    <div class="art-actions">${flipControl}<span class="what">${what}</span>
+      <a class="text-btn" href="https://www.discogs.com/release/${r.id}" target="_blank" rel="noopener">View on Discogs</a></div>
+    ${n > 1 ? `<div class="photo-strip" role="group" aria-label="Photos from Discogs">${Array.from({ length: n }, (_, i) => `
+      <button type="button" class="thumb ${i === shown ? "on" : ""}" data-photo="${i}" aria-label="Photo ${i + 1}${i === 0 ? ", front cover" : i === back ? ", back cover" : ""}" aria-pressed="${i === shown}">
+        <img src="/img/${r.id}/${i === 0 ? "front" : i}?size=thumb" alt="" loading="lazy" decoding="async">
+        ${i === 0 ? `<span class="tag">Front</span>` : i === back ? `<span class="tag">Back</span>` : ""}
+      </button>`).join("")}</div>` : ""}
+    ${picker}
+    ${art.msg ? `<p class="pick err">${esc(art.msg)}</p>` : ""}`;
+  box.querySelector(".thumb.on")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+async function setBack(photo) {
+  const r = art.r;
+  art.msg = "";
+  try {
+    const res = await fetch(`/api/backs/${r.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ photo }) });
+    if (!res.ok) throw new Error(res.status === 403 ? "Editing is locked on this server" : `Server answered ${res.status}`);
+    const out = await res.json();
+    for (const x of state.records) if (x.id === r.id) x.back = out.back ?? null;
+  } catch (err) {
+    art.msg = `Not saved: ${err.message}`;
+  }
+  paintArt(false);
+}
+
+
+
 function openDetail(uid, list = state.filtered) {
   const r = state.byUid.get(uid);
   if (!r) return;
@@ -546,16 +599,7 @@ function openDetail(uid, list = state.filtered) {
   const discogs = `https://www.discogs.com/release/${r.id}`;
   const fact = (k, v) => (v ? `<dt>${k}</dt><dd>${v}</dd>` : "");
   dlg.innerHTML = `<div class="d-grid">
-    <div class="d-art">
-      <button type="button" class="flip" id="flip" ${r.has_back ? "" : "disabled"} aria-label="${r.has_back ? "Show back cover" : "Front cover"}">
-        <div class="flip-inner">
-          <div class="face front">${sleeve(r, { eager: true })}</div>
-          ${r.has_back ? `<div class="face back">${sleeve(r, { side: "back", eager: true })}</div>` : ""}
-        </div>
-      </button>
-      <div class="art-actions">${r.has_back ? `<button type="button" class="text-btn" id="flip-btn">Show back</button>` : "<span>No back cover on file</span>"}
-        <a class="text-btn" href="${discogs}" target="_blank" rel="noopener">View on Discogs</a></div>
-    </div>
+    <div class="d-art" id="d-art"></div>
     <div class="d-body">
       <div class="d-top">
         <div><h2 class="d-title" id="d-title">${esc(r.title)}</h2>
@@ -582,11 +626,14 @@ function openDetail(uid, list = state.filtered) {
     </div>
   </div>`;
   if (!dlg.open) dlg.showModal();
+  dlg.focus(); // focus the sheet itself, not the first link in it
   dlg.scrollTop = 0;
   syncUrl({ r: uid });
 
-  const flip = () => { const f = $("#flip"); f.classList.toggle("flipped"); const b = $("#flip-btn"); if (b) b.textContent = f.classList.contains("flipped") ? "Show front" : "Show back"; };
-  if (r.has_back) { $("#flip").onclick = flip; $("#flip-btn").onclick = flip; }
+  art.r = r;
+  art.shown = 0;
+  art.msg = "";
+  paintArt(false);
   $("#d-close").onclick = closeDetail;
   if (prev) $("#d-prev").onclick = () => step(prev);
   if (next) $("#d-next").onclick = () => step(next);
@@ -625,7 +672,13 @@ function bindDetail() {
     syncUrl();
     if (state.view === "gallery" && state.galleryUid) render(); // land the crate on the last viewed record
   });
-  dlg.addEventListener("click", (e) => { if (e.target === dlg) closeDetail(); }); // backdrop
+  dlg.addEventListener("click", (e) => {
+    if (e.target === dlg) return closeDetail(); // backdrop
+    const p = e.target.closest("[data-photo]");
+    if (p && !p.disabled) { art.shown = +p.dataset.photo; art.msg = ""; return paintArt(); }
+    const b = e.target.closest("[data-back]");
+    if (b) setBack(b.dataset.back === "clear" ? null : +b.dataset.back);
+  });
   document.addEventListener("keydown", (e) => {
     if (!dlg.open || e.target.matches("input")) return;
     if (e.key === "ArrowRight") $("#d-next")?.click();

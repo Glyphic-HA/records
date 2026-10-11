@@ -19,7 +19,7 @@ from pathlib import Path
 from . import config, images, store
 from .discogs import Discogs, DiscogsError, clean_name, details_from_release, record_from_collection_item
 
-DETAIL_FIELDS = ("tracklist", "back_url", "country", "released", "notes", "details_synced")
+DETAIL_FIELDS = ("tracklist", "images", "country", "released", "notes", "details_synced")
 
 
 def log(msg: str) -> None:
@@ -32,11 +32,16 @@ def now_iso() -> str:
 
 # --------------------------------------------------------------------------- sync
 
+def has_details(r: dict) -> bool:
+    # Records synced by older versions lack the full photo list; they get looked up again once.
+    return bool(r.get("details_synced")) and "images" in r
+
+
 def merge(fresh: list[dict], previous: list[dict]) -> list[dict]:
     """Fresh collection metadata wins; per-release details we already fetched are kept."""
     known = {}
     for r in previous:
-        if r.get("details_synced"):
+        if has_details(r):
             known.setdefault(int(r["id"]), r)
     out = []
     for r in fresh:
@@ -61,13 +66,17 @@ def run_sync(client: Discogs, *, details_limit: int | None, fetch_images: bool,
     if not fresh:
         raise DiscogsError("Discogs returned an empty collection; refusing to overwrite local data.")
 
+    removed = images.remove_guessed_backs()
+    if removed:
+        log(f"Removed {removed} back-cover file(s) guessed by an older version")
+
     data = store.load_collection()
     records = merge(fresh, [] if refresh_details else data["records"])
     data.update(records=records, username=client.username, synced_at=now_iso())
     store.save_collection(data)
 
-    # Per-release details (tracklist, back cover). One request each, so do them incrementally.
-    todo = [r for r in records if not r.get("details_synced")]
+    # Per-release details (tracklist, all photos). One request each, so do them incrementally.
+    todo = [r for r in records if not has_details(r)]
     seen: dict[int, dict] = {}
     if details_limit is not None:
         todo = todo[:details_limit]
@@ -89,18 +98,18 @@ def run_sync(client: Discogs, *, details_limit: int | None, fetch_images: bool,
     if fetch_images:
         got = failed = 0
         for r in records:
-            for side, key in (("front", "cover_url"), ("back", "back_url")):
-                if images.find_local(r["id"], side) or not r.get(key):
-                    continue
-                try:
-                    if images.download(client, r["id"], side, r[key]):
-                        got += 1
-                except DiscogsError as exc:
-                    failed += 1
-                    log(f"  ! image {r['id']} {side}: {exc}")
+            # Only the front is fetched ahead of time; other photos load when a record is opened.
+            if images.find_local(r["id"], "front") or not r.get("cover_url"):
+                continue
+            try:
+                if images.download(client, r["id"], "front", r["cover_url"]):
+                    got += 1
+            except DiscogsError as exc:
+                failed += 1
+                log(f"  ! image {r['id']}: {exc}")
         log(f"Downloaded {got} image(s), {failed} failed")
 
-    missing = sum(1 for r in records if not r.get("details_synced"))
+    missing = sum(1 for r in records if not has_details(r))
     log(f"Done. {len(records)} records; {missing} still waiting on details (next run picks them up).")
     return data
 
@@ -152,7 +161,7 @@ def import_legacy(src: Path, images_dir: Path | None, bins_file: Path | None) ->
         config.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
         for r in records:
             rid = r["id"]
-            for side, names in (("front", (f"{rid}", f"cover_{rid}")), ("back", (f"back_{rid}",))):
+            for side, names in (("front", (f"{rid}", f"cover_{rid}")),):
                 if images.find_local(rid, side):
                     continue
                 for stem in names:

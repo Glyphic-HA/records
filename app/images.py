@@ -1,8 +1,12 @@
-"""Local cover-art cache: data/images/<release_id>-front.jpg, -back.jpg, plus small thumbnails.
+"""Local image cache in data/images/.
 
-Covers are normally downloaded by the nightly sync. If one is missing when a page asks
-for it, the server fetches it on the spot (when a Discogs token is configured) and
-remembers failures for a while so a dead image doesn't trigger a request every page view.
+    <release_id>-front.jpg   the primary image (photo 0); downloaded by the sync
+    <release_id>-p<n>.jpg    other Discogs photos (n >= 1); downloaded the first time someone looks
+    *.thumb.jpg              ~320px versions, made on demand
+
+If an image is missing when a page asks for it, the server fetches it on the spot (when a
+Discogs token is configured) and remembers failures for a while, so a dead image doesn't
+trigger a request on every page view.
 """
 from __future__ import annotations
 
@@ -13,13 +17,16 @@ from pathlib import Path
 
 from . import config
 
-SIDES = ("front", "back")
 EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 THUMB_WIDTH = 320
 MISS_TTL = 7 * 24 * 3600  # retry a failed image after a week
 
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
+
+
+def key_for(photo: int) -> str:
+    return "front" if photo == 0 else f"p{photo}"
 
 
 def _lock_for(key: str) -> threading.Lock:
@@ -41,74 +48,95 @@ def _ext_for(content_type: str, url: str = "") -> str:
     return ".jpg"
 
 
-def find_local(release_id: int, side: str) -> Path | None:
+def find_local(release_id: int, key: str) -> Path | None:
     for ext in EXTS:
-        p = config.IMAGES_DIR / f"{release_id}-{side}{ext}"
+        p = config.IMAGES_DIR / f"{release_id}-{key}{ext}"
         if p.is_file() and p.stat().st_size > 0:
             return p
     return None
 
 
-def _miss_marker(release_id: int, side: str) -> Path:
-    return config.IMAGES_DIR / f"{release_id}-{side}.missing"
+def _miss_marker(release_id: int, key: str) -> Path:
+    return config.IMAGES_DIR / f"{release_id}-{key}.missing"
 
 
-def recently_missed(release_id: int, side: str) -> bool:
-    m = _miss_marker(release_id, side)
+def recently_missed(release_id: int, key: str) -> bool:
+    m = _miss_marker(release_id, key)
     return m.exists() and (time.time() - m.stat().st_mtime) < MISS_TTL
 
 
-def mark_missing(release_id: int, side: str) -> None:
+def mark_missing(release_id: int, key: str) -> None:
     config.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    _miss_marker(release_id, side).touch()
+    _miss_marker(release_id, key).touch()
 
 
-def save(release_id: int, side: str, content: bytes, content_type: str = "", url: str = "") -> Path:
+def save(release_id: int, key: str, content: bytes, content_type: str = "", url: str = "") -> Path:
     config.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    path = config.IMAGES_DIR / f"{release_id}-{side}{_ext_for(content_type, url)}"
+    path = config.IMAGES_DIR / f"{release_id}-{key}{_ext_for(content_type, url)}"
     tmp = path.with_suffix(path.suffix + ".part")
     tmp.write_bytes(content)
     tmp.replace(path)
-    _miss_marker(release_id, side).unlink(missing_ok=True)
+    _miss_marker(release_id, key).unlink(missing_ok=True)
     return path
 
 
-def download(client, release_id: int, side: str, url: str | None) -> Path | None:
+def download(client, release_id: int, key: str, url: str | None) -> Path | None:
     """Download one image if we know its URL. Returns the local path or None."""
     if not url:
         return None
-    with _lock_for(f"{release_id}-{side}"):
-        existing = find_local(release_id, side)
+    with _lock_for(f"{release_id}-{key}"):
+        existing = find_local(release_id, key)
         if existing:
             return existing
         content, ctype = client.download(url)
         if not content:
             return None
-        return save(release_id, side, content, ctype, url)
+        return save(release_id, key, content, ctype, url)
 
 
-def ensure(client, record: dict | None, release_id: int, side: str) -> Path | None:
-    """Local path for this image, fetching it from Discogs if needed and allowed."""
-    found = find_local(release_id, side)
-    if found or client is None or recently_missed(release_id, side):
+def photo_url(record: dict | None, photo: int) -> str | None:
+    record = record or {}
+    if photo == 0:
+        return record.get("cover_url") or ((record.get("images") or [None])[0])
+    imgs = record.get("images") or []
+    return imgs[photo] if 0 < photo < len(imgs) else None
+
+
+def ensure(client, record: dict | None, release_id: int, photo: int) -> Path | None:
+    """Local path for photo N of a release, fetching it from Discogs if needed and allowed."""
+    key = key_for(photo)
+    found = find_local(release_id, key)
+    if found or client is None or recently_missed(release_id, key):
         return found
-    with _lock_for(f"{release_id}-{side}"):
-        found = find_local(release_id, side)
-        if found or recently_missed(release_id, side):
+    with _lock_for(f"{release_id}-{key}"):
+        found = find_local(release_id, key)
+        if found or recently_missed(release_id, key):
             return found
         try:
-            url = (record or {}).get("cover_url" if side == "front" else "back_url")
-            if not url and (side == "front" or not (record or {}).get("details_synced")):
+            url = photo_url(record, photo)
+            if not url and photo == 0:  # no URL on file yet: ask Discogs for the release
                 from .discogs import details_from_release
-                url = details_from_release(client.release(release_id)).get(f"{'cover' if side == 'front' else 'back'}_url")
+                url = details_from_release(client.release(release_id)).get("cover_url")
             if not url:
-                mark_missing(release_id, side)
+                mark_missing(release_id, key)
                 return None
             content, ctype = client.download(url)
-            return save(release_id, side, content, ctype, url)
+            return save(release_id, key, content, ctype, url)
         except Exception:
-            mark_missing(release_id, side)
+            mark_missing(release_id, key)
             return None
+
+
+def remove_guessed_backs() -> int:
+    """Delete '<id>-back.*' files left by older versions, which guessed the back cover
+    (usually wrongly) as the second Discogs photo."""
+    if not config.IMAGES_DIR.is_dir():
+        return 0
+    n = 0
+    for p in config.IMAGES_DIR.glob("*-back*"):
+        p.unlink(missing_ok=True)
+        n += 1
+    return n
 
 
 def thumbnail(src: Path) -> Path:

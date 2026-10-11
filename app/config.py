@@ -28,6 +28,7 @@ DATA_DIR = Path(os.environ.get("RC_DATA_DIR", ROOT / "data")).resolve()
 IMAGES_DIR = DATA_DIR / "images"
 COLLECTION_PATH = DATA_DIR / "collection.json"
 BINS_PATH = DATA_DIR / "bins.json"
+BACKS_PATH = DATA_DIR / "backs.json"
 WEB_DIR = ROOT / "web"
 
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN", "").strip()

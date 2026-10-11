@@ -5,7 +5,8 @@ A small web app for browsing a vinyl collection that lives on Discogs. It runs o
 - **Gallery** works like flipping through a crate. Drag, scroll, or use the arrow keys, then click the front record.
 - **List** is sortable by artist, title, or year. A–Z sorts get bin-divider letters ("The" is ignored when filing).
 - **Stats** shows collection growth over time, genres, decades, and the artists and labels you collect most. Click any bar to list those records.
-- **Record details** include front and back covers (click to flip), the tracklist, label and catalog number, and a link to Discogs. There's also a **Bin** field for noting where a record lives on your shelf.
+- **Record details** show every photo of the release from Discogs, plus the tracklist, label and catalog number, and a link to Discogs. There's also a **Bin** field for noting where a record lives on your shelf.
+- **Back covers:** Discogs doesn't label which photo is the back (uploaders add them in any order), so you pick it. Open a photo and choose **Use as back cover**. After that, clicking the cover flips between front and back. You only do this once per record.
 - Search covers artist, title, label, catalog number, style, and track names. You can also filter by genre, decade, and format. Every view can be linked to, filters and open record included.
 - Dark and light themes, and it works on a phone.
 - A nightly sync picks up records you've added on Discogs.
@@ -123,7 +124,7 @@ This time it installs the app as a service that starts on boot, sets up the nigh
 
 From any phone or computer on your network, go to **http://records.local:8000**
 
-Records appear right away, and covers fill in as they download. Tracklists and back covers arrive over about the next 20 minutes for a ~1,000-record collection, because Discogs limits how fast apps can ask for data. You can watch the progress:
+Records appear right away, and covers fill in as they download. Tracklists and the full photo lists arrive over about the next 20 minutes for a ~1,000-record collection, because Discogs limits how fast apps can ask for data. You can watch the progress:
 
 ```bash
 journalctl -u record-collection-sync -f      # Ctrl+C to stop watching
@@ -160,10 +161,11 @@ systemctl list-timers record-collection-sync    # when the next sync runs
 cd ~/records && git pull && ./deploy/setup.sh
 ```
 
-**Backing up.** Everything lives in `~/records/data/`: the collection, cached covers, and your bin locations. Everything except bin locations can be rebuilt from Discogs, so the one file worth copying off the Pi is `data/bins.json`. From a Windows Command Prompt or PowerShell on your computer, use `pscp`, which comes with PuTTY:
+**Backing up.** Everything lives in `~/records/data/`: the collection, cached covers, your bin locations, and your back-cover picks. Everything else can be rebuilt from Discogs, so the files worth copying off the Pi are `data/bins.json` and `data/backs.json`. From a Windows Command Prompt or PowerShell on your computer, use `pscp`, which comes with PuTTY:
 
 ```bat
 pscp eli@records.local:records/data/bins.json .
+pscp eli@records.local:records/data/backs.json .
 ```
 
 To drag and drop files instead, [WinSCP](https://winscp.net) connects with the same host, username and password as PuTTY. On Mac or Linux, use `scp` with the same arguments.
@@ -218,7 +220,8 @@ Sync options: `.venv/bin/python -m app.sync --help`. They include `--details-lim
 | `GET /api/collection` | all records, with tracklists and bins |
 | `GET /api/health` | record count and last sync time |
 | `PUT /api/bins/<release_id>` | `{"bin": "A3"}`. Needs an `X-Edit-Token` header if `RC_EDIT_TOKEN` is set |
-| `GET /img/<release_id>/front` or `/back` | cover art. Add `?size=thumb` for a 320px version. Missing covers are fetched from Discogs on demand |
+| `PUT /api/backs/<release_id>` | `{"photo": 2}` marks Discogs photo 2 as the back cover; `{"photo": null}` clears it. Same edit-token rule |
+| `GET /img/<release_id>/<n>` | Discogs photo *n* (0 = front; `front` and `back` also work). Add `?size=thumb` for a 320px version. Photos are fetched from Discogs the first time they're viewed |
 
 ### Developing on your own computer
 

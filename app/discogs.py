@@ -149,14 +149,14 @@ def details_from_release(rel: dict) -> dict:
             "title": t.get("title", ""),
             "duration": t.get("duration", ""),
         })
-    images = rel.get("images") or []
-    primary = next((i for i in images if i.get("type") == "primary"), images[0] if images else None)
-    others = [i for i in images if i is not primary]
-    back = others[0] if others else None
+    # Discogs doesn't label images beyond "primary"/"secondary", and uploaders add them in any
+    # order, so we keep every photo (primary first) and let the user say which one is the back.
+    imgs = [i for i in (rel.get("images") or []) if i.get("uri")]
+    imgs.sort(key=lambda i: i.get("type") != "primary")  # stable: primary first, rest in Discogs order
     return {
         "tracklist": tracks,
-        "cover_url": primary.get("uri") if primary else None,
-        "back_url": back.get("uri") if back else None,
+        "cover_url": imgs[0]["uri"] if imgs else None,
+        "images": [i["uri"] for i in imgs],
         "country": rel.get("country") or "",
         "released": rel.get("released") or "",
         "notes": (rel.get("notes") or "").strip()[:2000],

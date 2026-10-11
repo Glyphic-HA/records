@@ -13,6 +13,7 @@ def tmp_data(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "IMAGES_DIR", tmp_path / "images")
     monkeypatch.setattr(config, "COLLECTION_PATH", tmp_path / "collection.json")
     monkeypatch.setattr(config, "BINS_PATH", tmp_path / "bins.json")
+    monkeypatch.setattr(config, "BACKS_PATH", tmp_path / "backs.json")
     monkeypatch.setattr(config, "DISCOGS_TOKEN", "")
     monkeypatch.setattr(config, "EDIT_TOKEN", "")
     return tmp_path
@@ -43,7 +44,8 @@ RELEASE = {
         {"type_": "track", "position": "A1", "title": "Singapore", "duration": "2:46"},
         {"type_": "track", "position": "A2", "title": "Clap Hands", "duration": "3:47"},
     ],
-    "images": [
+    "images": [  # Discogs order is arbitrary: here the label comes before the back
+        {"type": "secondary", "uri": "https://i.discogs.com/label.jpg"},
         {"type": "primary", "uri": "https://i.discogs.com/front.jpg"},
         {"type": "secondary", "uri": "https://i.discogs.com/back.jpg"},
     ],
@@ -94,7 +96,9 @@ def test_record_and_details_shape():
     assert r["format_detail"] == "LP, Album" and r["genres"] == ["Rock", "Blues"]
     d = details_from_release(RELEASE)
     assert [t["title"] for t in d["tracklist"]] == ["Singapore", "Clap Hands"]  # heading skipped
-    assert d["back_url"].endswith("back.jpg")
+    # primary first, then the rest in Discogs order; no guessing which one is the back
+    assert [u.rsplit("/", 1)[1] for u in d["images"]] == ["front.jpg", "label.jpg", "back.jpg"]
+    assert d["cover_url"].endswith("front.jpg") and "back_url" not in d
 
 
 def test_rate_limit_retry():
@@ -114,8 +118,24 @@ def test_full_sync_fetches_details_and_images():
     data = store.load_collection()
     assert data["username"] == "glyphic" and data["synced_at"]
     [r] = data["records"]
-    assert r["details_synced"] and len(r["tracklist"]) == 2
-    assert images.find_local(111, "front") and images.find_local(111, "back")
+    assert r["details_synced"] and len(r["tracklist"]) == 2 and len(r["images"]) == 3
+    assert images.find_local(111, "front")
+    assert not images.find_local(111, "p1")  # other photos load lazily
+
+
+def test_resync_refetches_old_records_and_removes_guessed_backs(tmp_data):
+    # A record synced by the previous version: details but no photo list, plus a guessed back file.
+    store.save_collection({"records": [{"id": 111, "title": "Rain Dogs", "tracklist": [], "back_url": "x",
+                                        "details_synced": True}]})
+    (tmp_data / "images").mkdir()
+    (tmp_data / "images" / "111-back.jpg").write_bytes(b"wrong")
+    (tmp_data / "images" / "111-back.thumb.jpg").write_bytes(b"wrong")
+    c = fake_client()
+    sync.run_sync(c, details_limit=None, fetch_images=False)
+    assert any(u.endswith("/releases/111") for u in c.session.calls)
+    [r] = store.load_collection()["records"]
+    assert len(r["images"]) == 3 and "back_url" not in r
+    assert not list((tmp_data / "images").glob("*-back*"))
 
 
 def test_resync_keeps_details_without_refetching():
@@ -175,7 +195,8 @@ def test_index_and_assets(client):
 def test_collection_api(client):
     body = client.get("/api/collection").get_json()
     [r] = body["records"]
-    assert r["uid"] == "9001" and r["has_back"] and r["tracklist"][0]["position"] == "A1"
+    assert r["uid"] == "9001" and r["tracklist"][0]["position"] == "A1"
+    assert r["photos"] == 3 and r["back"] is None
     assert body["can_edit"] is True
 
 
@@ -192,6 +213,37 @@ def test_images_and_thumbnails(client):
     assert thumb.status_code == 200 and len(thumb.data) < len(full.data)
     assert client.get("/img/111/side").status_code == 404
     assert client.get("/img/999/front").status_code == 404
+    assert client.get("/img/111/back").status_code == 404   # no back chosen yet
+    assert client.get("/img/111/7").status_code == 404      # out of range
+
+
+def test_other_photos_download_on_demand(client, monkeypatch):
+    import app.server as srv
+    monkeypatch.setattr(srv, "_client", fake_client)
+    assert client.get("/img/111/2").status_code == 200
+    assert images.find_local(111, "p2")
+
+
+def test_choose_back_cover(client, monkeypatch):
+    import app.server as srv
+    monkeypatch.setattr(srv, "_client", fake_client)
+    assert client.put("/api/backs/111", json={"photo": 2}).get_json() == {"id": 111, "back": 2}
+    rec = client.get("/api/collection").get_json()["records"][0]
+    assert rec["back"] == 2
+    assert client.get("/img/111/back").status_code == 200
+    # invalid choices
+    for bad in (0, 3, "2", True, -1):
+        assert client.put("/api/backs/111", json={"photo": bad}).status_code == 400
+    assert client.put("/api/backs/999", json={"photo": 1}).status_code == 404
+    # clear it
+    assert client.put("/api/backs/111", json={"photo": None}).get_json() == {"id": 111, "back": None}
+    assert client.get("/api/collection").get_json()["records"][0]["back"] is None
+    # survives a re-sync
+    client.put("/api/backs/111", json={"photo": 1})
+    sync.run_sync(fake_client(), details_limit=None, fetch_images=False)
+    assert client.get("/api/collection").get_json()["records"][0]["back"] == 1
+    monkeypatch.setattr(config, "EDIT_TOKEN", "secret")
+    assert client.put("/api/backs/111", json={"photo": 2}).status_code == 403
 
 
 def test_missing_image_without_token_is_404(client):
