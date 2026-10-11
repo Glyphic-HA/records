@@ -32,6 +32,7 @@ BACKS_PATH = DATA_DIR / "backs.json"
 PRICES_PATH = DATA_DIR / "prices.json"          # per-record price history
 VALUE_PATH = DATA_DIR / "value_history.json"     # collection value over time
 SYNC_LOCK = DATA_DIR / "sync.lock"
+ARTISTS_PATH = DATA_DIR / "artists.json"         # band members / groups, for the family tree
 COLORS_PATH = DATA_DIR / "colors.json"           # cover colors for the shelves page
 SHELVES_PATH = DATA_DIR / "shelves.json"         # shelf layout + where each cubby starts
 SYNC_STATUS = DATA_DIR / "sync_status.json"
@@ -49,6 +50,8 @@ DISCOGS_USER_AGENT = os.environ.get(
 CURRENCY = os.environ.get("DISCOGS_CURRENCY", "USD").strip().upper() or "USD"
 # How many records get a fresh marketplace price each sync (rolling, oldest first; ~1s each).
 PRICE_REFRESH = int(os.environ.get("RC_PRICE_REFRESH", "150") or 0)
+# How many artists' member lists to look up each sync (new ones first, then any older than 90 days).
+ARTIST_REFRESH = int(os.environ.get("RC_ARTIST_REFRESH", "300") or 0)
 
 FETCH_MISSING_IMAGES = os.environ.get("RC_FETCH_MISSING_IMAGES", "1") != "0"
 # Optional shared secret required to edit bin locations (leave blank on a trusted home network).

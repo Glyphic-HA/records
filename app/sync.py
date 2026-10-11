@@ -19,10 +19,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config, images, prices, store
-from .discogs import (Discogs, DiscogsError, clean_name, details_from_release, price_from_release,
-                      record_from_collection_item)
+from .discogs import (Discogs, DiscogsError, clean_name, details_from_release, members_from_artist,
+                      price_from_release, record_from_collection_item)
 
-DETAIL_FIELDS = ("tracklist", "images", "country", "released", "notes", "price", "details_synced")
+DETAIL_FIELDS = ("tracklist", "images", "country", "released", "notes", "price", "credits", "companies",
+                 "community", "weight", "details_synced")
+VARIOUS_ARTISTS_ID = 194
+ARTIST_MAX_AGE_DAYS = 90
 
 
 def log(msg: str) -> None:
@@ -36,8 +39,9 @@ def now_iso() -> str:
 # --------------------------------------------------------------------------- sync
 
 def has_details(r: dict) -> bool:
-    # Records synced by older versions lack the full photo list; they get looked up again once.
-    return bool(r.get("details_synced")) and "images" in r
+    # Records synced by older versions lack newer fields (photo list, credits); they get
+    # looked up again once.
+    return bool(r.get("details_synced")) and "images" in r and "credits" in r
 
 
 def merge(fresh: list[dict], previous: list[dict]) -> list[dict]:
@@ -127,6 +131,8 @@ def run_sync(client: Discogs, *, details_limit: int | None, fetch_images: bool,
         store.save_collection(data)
     prices.note_prices(records)
 
+    sync_artists(client, records)
+
     value = None
     try:
         value = prices.note_value(client.collection_value())
@@ -156,6 +162,38 @@ def run_sync(client: Discogs, *, details_limit: int | None, fetch_images: bool,
     log(f"Done. {len(records)} records; {missing} still waiting on details (next run picks them up).")
     return {"records": len(records), "added": added, "removed": gone, "details_pending": missing,
             "value": (value or {}).get("display", {}).get("median")}
+
+
+def sync_artists(client: Discogs, records: list[dict], limit: int | None = None) -> int:
+    """Look up band members (and a person's bands) for artists in the collection, so the app can
+    show who played in what. Rolling: new artists first, then ones not checked in 90 days."""
+    from datetime import date
+    limit = config.ARTIST_REFRESH if limit is None else limit
+    cache = dict(store.read_json(config.ARTISTS_PATH, {}))
+    wanted = {i for r in records for i in (r.get("artist_ids") or []) if i != VARIOUS_ARTISTS_ID}
+    today = date.today()
+
+    def age(i):
+        checked = (cache.get(str(i)) or {}).get("checked")
+        try:
+            return (today - date.fromisoformat(checked)).days if checked else 10**6
+        except ValueError:
+            return 10**6
+    todo = sorted((i for i in wanted if age(i) > ARTIST_MAX_AGE_DAYS), key=age, reverse=True)[:max(limit, 0)]
+    if not todo:
+        return 0
+    log(f"Looking up band members for {len(todo)} artist(s) ...")
+    done = 0
+    for n, i in enumerate(todo, 1):
+        try:
+            cache[str(i)] = members_from_artist(client.artist(i))
+            done += 1
+        except DiscogsError as exc:
+            log(f"  ! artist {i}: {exc}")
+        if n % 50 == 0:
+            store.write_json(config.ARTISTS_PATH, cache)
+    store.write_json(config.ARTISTS_PATH, cache)
+    return done
 
 
 # --------------------------------------------------------------- legacy import

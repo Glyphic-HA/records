@@ -450,3 +450,18 @@ main { outline: none; }
   .unit[style*="--cols:4"] .full-note, .unit[style*="--cols:5"] .full-note, .unit[style*="--cols:6"] .full-note { display: none; }
   .cubby.editing input { font-size: 16px; }
 }
+
+/* ---------- people ---------- */
+.credits { margin-top: 26px; }
+.credits h3 { margin: 0 0 4px; font-size: 15px; color: var(--muted); font-weight: 600; }
+.credits .facts-list { margin-top: 8px; }
+.credits a, .facts-list dd a { text-decoration: none; border-bottom: 1px solid var(--line); }
+.credits a:hover { border-color: var(--ink-2); }
+.muted { color: var(--muted); }
+.all-credits { margin-top: 10px; font-size: 14px; }
+.all-credits summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+.tree { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.tree li { display: grid; gap: 2px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.tree .who { font-weight: 700; text-decoration: none; }
+.tree span { color: var(--ink-2); font-size: 14px; }
+.tree span a { text-decoration: none; border-bottom: 1px solid var(--line); }

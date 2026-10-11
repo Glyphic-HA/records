@@ -89,6 +89,9 @@ class Discogs:
         # curr_abbr sets the currency of the release's lowest_price field
         return self.get(f"/releases/{release_id}", params={"curr_abbr": config.CURRENCY}).json()
 
+    def artist(self, artist_id: int) -> dict:
+        return self.get(f"/artists/{artist_id}").json()
+
     def collection_value(self) -> dict:
         """{"minimum": "$1,234.00", "median": ..., "maximum": ...}: Discogs' estimate from sales history.
         Only works for your own collection, with your token."""
@@ -143,12 +146,14 @@ def record_from_collection_item(item: dict) -> dict:
         "catno": (labels[0].get("catno") or "") if labels else "",
         "format": fmt.get("name", ""),
         "format_detail": ", ".join(dict.fromkeys(details)),
+        "format_text": "; ".join(dict.fromkeys(f["text"].strip() for f in formats if (f.get("text") or "").strip())),
         "qty": int(fmt.get("qty") or 1) if str(fmt.get("qty", "1")).isdigit() else 1,
         "genres": info.get("genres") or [],
         "styles": info.get("styles") or [],
         "date_added": item.get("date_added"),
         "rating": item.get("rating") or 0,
         "cover_url": cover or None,
+        "artist_ids": [a["id"] for a in (info.get("artists") or []) if a.get("id")],
     }
 
 
@@ -174,8 +179,57 @@ def details_from_release(rel: dict) -> dict:
         "released": rel.get("released") or "",
         "notes": (rel.get("notes") or "").strip()[:2000],
         "price": price_from_release(rel),
+        "credits": credits_from_release(rel),
+        "companies": [{"name": clean_name(c.get("name", "")), "role": c.get("entity_type_name", "")}
+                      for c in (rel.get("companies") or []) if c.get("name")][:30],
+        "community": community_from_release(rel),
+        "weight": int(rel["estimated_weight"]) if isinstance(rel.get("estimated_weight"), (int, float)) else None,
+        "artist_ids": [a["id"] for a in (rel.get("artists") or []) if a.get("id")],
         "details_synced": True,
     }
+
+
+_BRACKETS = re.compile(r"\s*\[[^\]]*\]")
+
+
+def credits_from_release(rel: dict) -> list[dict]:
+    """Everyone credited on the release or its tracks: [{"name", "id", "role"}], one row per
+    person and role. "Producer, Mixed By" becomes two roles; "[Assistant]"-style notes are dropped."""
+    rows = list(rel.get("extraartists") or [])
+    for t in rel.get("tracklist") or []:
+        rows += t.get("extraartists") or []
+    seen, out = set(), []
+    for c in rows:
+        name = clean_name(c.get("name", ""))
+        for role in (c.get("role") or "").split(","):
+            role = _BRACKETS.sub("", role).strip()
+            if not name or not role:
+                continue
+            key = (c.get("id") or name, role)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"name": name, "id": c.get("id"), "role": role})
+    return out[:120]
+
+
+def community_from_release(rel: dict) -> dict | None:
+    c = rel.get("community") or {}
+    if not c:
+        return None
+    rating = c.get("rating") or {}
+    return {"have": int(c.get("have") or 0), "want": int(c.get("want") or 0),
+            "rating": round(float(rating.get("average") or 0), 2), "votes": int(rating.get("count") or 0)}
+
+
+def members_from_artist(art: dict) -> dict:
+    """A Discogs artist page, reduced to who's in the band (or which bands this person is in)."""
+    def people(rows):
+        return [{"id": m["id"], "name": clean_name(m.get("name", "")), "active": bool(m.get("active", True))}
+                for m in rows or [] if m.get("id")]
+    return {"name": clean_name(art.get("name", "")), "members": people(art.get("members")),
+            "groups": people(art.get("groups")),
+            "checked": datetime.now(timezone.utc).date().isoformat()}
 
 
 def price_from_release(rel: dict) -> dict:

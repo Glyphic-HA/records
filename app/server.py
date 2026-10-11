@@ -43,6 +43,13 @@ def public_record(r: dict, bins: dict[str, str], backs: dict[str, int]) -> dict:
         "back": back if back and back < photos else None,   # photo index chosen as the back cover
         "bin": bins.get(str(rid), ""),
         "price": r.get("price") or None,                    # lowest marketplace listing
+        "format_text": r.get("format_text") or "",          # e.g. "Clear w/ Red Splatter"
+        "qty": r.get("qty") or 1,
+        "credits": r.get("credits") or [],
+        "companies": r.get("companies") or [],
+        "community": r.get("community"),
+        "weight": r.get("weight"),
+        "artist_ids": r.get("artist_ids") or [],
     }
 
 
@@ -113,6 +120,7 @@ def create_app() -> Flask:
             currency=config.CURRENCY,
             value_history=prices.load_value_history(),
             colors=store.read_json(config.COLORS_PATH, {}),
+            artists=store.read_json(config.ARTISTS_PATH, {}),
         )
 
     # ---- sync -----------------------------------------------------------------

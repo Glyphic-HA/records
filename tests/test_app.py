@@ -37,18 +37,28 @@ COLLECTION_ITEM = {
     "basic_information": {
         "id": 111, "title": "Rain Dogs", "year": 1985,
         "cover_image": "https://i.discogs.com/front.jpg",
-        "artists": [{"name": "Tom Waits", "anv": "", "join": ""}],
+        "artists": [{"name": "Tom Waits", "anv": "", "join": "", "id": 82730}],
         "labels": [{"name": "Island Records (2)", "catno": "ILPS 9803"}],
-        "formats": [{"name": "Vinyl", "qty": "1", "descriptions": ["LP", "Album"]}],
+        "formats": [{"name": "Vinyl", "qty": "1", "descriptions": ["LP", "Album"], "text": "Clear"}],
         "genres": ["Rock", "Blues"], "styles": ["Blues Rock"],
     },
 }
 RELEASE = {
     "id": 111, "country": "UK", "released": "1985-09-30", "notes": "",
-    "lowest_price": 12.5, "num_for_sale": 8,
+    "lowest_price": 12.5, "num_for_sale": 8, "estimated_weight": 230,
+    "artists": [{"name": "Tom Waits", "id": 82730}],
+    "extraartists": [
+        {"name": "Tom Waits", "id": 82730, "role": "Producer, Arranged By"},
+        {"name": "Robert Musso (2)", "id": 555, "role": "Engineer [Assistant]"},
+    ],
+    "companies": [{"name": "Island Records", "entity_type_name": "Phonographic Copyright (p)"},
+                  {"name": "Nimbus", "entity_type_name": "Pressed By"}],
+    "community": {"have": 4100, "want": 2200, "rating": {"count": 310, "average": 4.71}},
     "tracklist": [
         {"type_": "heading", "title": "Side A", "position": ""},
-        {"type_": "track", "position": "A1", "title": "Singapore", "duration": "2:46"},
+        {"type_": "track", "position": "A1", "title": "Singapore", "duration": "2:46",
+         "extraartists": [{"name": "Marc Ribot", "id": 77, "role": "Guitar"},
+                          {"name": "Tom Waits", "id": 82730, "role": "Producer"}]},
         {"type_": "track", "position": "A2", "title": "Clap Hands", "duration": "3:47"},
     ],
     "images": [  # Discogs order is arbitrary: here the label comes before the back
@@ -79,6 +89,11 @@ class FakeSession:
             return FakeResp(payload={"pagination": {"pages": 1}, "releases": [COLLECTION_ITEM]})
         if url.endswith("/releases/111"):
             return FakeResp(payload=RELEASE)
+        if "/artists/" in url:
+            aid = int(url.rsplit("/", 1)[1])
+            return FakeResp(payload={"id": aid, "name": f"Artist {aid}",
+                                     "members": [{"id": 1, "name": "Drummer (3)", "active": True}],
+                                     "groups": [{"id": 9, "name": "Some Band", "active": False}]})
         if url.endswith("/collection/value"):
             return FakeResp(payload={"minimum": "$1,000.00", "median": "$2,345.67", "maximum": "$5,000.00"})
         if url.endswith(".jpg"):
@@ -421,3 +436,50 @@ def test_wall_numbering():
     nums = shelves.numbering(shelves.DEFAULT["units"])
     assert nums[0] == [1, 2, 3, 4, 9, 10, 15, 16]                       # left 2x4
     assert nums[1] == [5, 6, 7, 8, 11, 12, 13, 14, 17, 18, 19, 20]      # right 4x3
+
+
+
+def test_credits_community_weight():
+    d = details_from_release(RELEASE)
+    roles = {(c["name"], c["role"]) for c in d["credits"]}
+    assert ("Tom Waits", "Producer") in roles and ("Tom Waits", "Arranged By") in roles
+    assert ("Robert Musso", "Engineer") in roles                # disambiguation + [Assistant] dropped
+    assert ("Marc Ribot", "Guitar") in roles                    # track-level credit
+    assert sum(1 for c in d["credits"] if c["role"] == "Producer") == 1   # de-duplicated
+    assert d["community"] == {"have": 4100, "want": 2200, "rating": 4.71, "votes": 310}
+    assert d["weight"] == 230 and d["artist_ids"] == [82730]
+    assert {"name": "Nimbus", "role": "Pressed By"} in d["companies"]
+    r = record_from_collection_item(COLLECTION_ITEM)
+    assert r["format_text"] == "Clear" and r["artist_ids"] == [82730]
+
+
+def test_artist_members_cached_and_rolling():
+    sync.run_sync(fake_client(), details_limit=None, fetch_images=False)
+    artists = store.read_json(config.ARTISTS_PATH, {})
+    a = artists["82730"]
+    assert a["members"][0]["name"] == "Drummer" and a["groups"][0] == {"id": 9, "name": "Some Band", "active": False}
+    c = fake_client()
+    assert sync.sync_artists(c, store.load_collection()["records"]) == 0   # fresh: nothing to do
+    artists["82730"]["checked"] = "2020-01-01"
+    store.write_json(config.ARTISTS_PATH, artists)
+    assert sync.sync_artists(c, store.load_collection()["records"]) == 1   # stale: refreshed
+    recs = [{"id": 1, "artist_ids": [194]}]                                # Various Artists skipped
+    assert sync.sync_artists(c, recs) == 0
+
+
+def test_older_records_refetched_for_credits():
+    sync.run_sync(fake_client(), details_limit=None, fetch_images=False)
+    data = store.load_collection()
+    data["records"][0].pop("credits")
+    store.save_collection(data)
+    c = fake_client()
+    sync.run_sync(c, details_limit=None, fetch_images=False)
+    assert any(u.endswith("/releases/111") for u in c.session.calls)
+    assert store.load_collection()["records"][0]["credits"]
+
+
+def test_api_includes_people(client):
+    body = client.get("/api/collection").get_json()
+    r = body["records"][0]
+    assert r["credits"] and r["community"]["have"] == 4100 and r["weight"] == 230 and r["format_text"] == "Clear"
+    assert body["artists"]["82730"]["members"]

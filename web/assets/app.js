@@ -13,7 +13,8 @@ const store = {
 
 const state = {
   records: [], byUid: new Map(), filtered: [], meta: {},
-  view: "gallery", f: { q: "", genre: "", decade: "", format: "", bin: "", sort: "added" }, shelves: null,
+  view: "gallery", f: { q: "", genre: "", decade: "", format: "", bin: "", who: "", sort: "added" }, shelves: null,
+  people: { links: [], name: new Map(), byArtist: new Map() },
   galleryUid: null, listLimit: 150, loaded: false, error: null,
 };
 
@@ -59,7 +60,7 @@ function parseHash() {
 function hashFor(view, extra = {}) {
   const p = new URLSearchParams();
   const f = { ...state.f, ...extra };
-  for (const k of ["q", "genre", "decade", "format", "bin"]) if (f[k]) p.set(k, f[k]);
+  for (const k of ["q", "genre", "decade", "format", "bin", "who"]) if (f[k]) p.set(k, f[k]);
   if (f.sort && f.sort !== "added") p.set("sort", f.sort);
   if (extra.r) p.set("r", extra.r);
   const qs = p.toString();
@@ -77,19 +78,21 @@ function readRoute() {
   state.view = view;
   state.f = {
     q: p.get("q") || "", genre: p.get("genre") || "", decade: p.get("decade") || "",
-    format: p.get("format") || "", bin: p.get("bin") || "", sort: p.get("sort") || "added",
+    format: p.get("format") || "", bin: p.get("bin") || "", who: p.get("who") || "", sort: p.get("sort") || "added",
   };
   return p.get("r");
 }
 
 // ------------------------------------------------------------------ filters
 function applyFilters() {
-  const { q, genre, decade, format, bin, sort } = state.f;
+  const { q, genre, decade, format, bin, who, sort } = state.f;
+  const whoKey = who.toLowerCase();
   const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
   let out = state.records.filter((r) => {
     if (genre && !r.genres.includes(genre)) return false;
     if (format && r.format !== format) return false;
     if (bin && r._bin !== bin) return false;
+    if (who && !r._people.has(whoKey)) return false;
     if (decade) {
       const d = decadeOf(r);
       if (decade === "none" ? d !== null : String(d) !== decade) return false;
@@ -132,7 +135,13 @@ function populateFilters() {
 function reflectFilters() {
   $("#f-q").value = state.f.q;
   for (const k of ["genre", "decade", "format", "sort"]) $(`#f-${k}`).value = state.f[k];
-  $("#f-clear").hidden = !(state.f.q || state.f.genre || state.f.decade || state.f.format || state.f.bin);
+  $("#f-clear").hidden = !(state.f.q || state.f.genre || state.f.decade || state.f.format || state.f.bin || state.f.who);
+  const wchip = $("#f-who");
+  wchip.hidden = !state.f.who;
+  if (state.f.who) {
+    wchip.innerHTML = `With ${esc(state.f.who)} <button type="button" aria-label="Remove ${esc(state.f.who)} filter">×</button>`;
+    wchip.querySelector("button").onclick = () => { state.f.who = ""; onFiltersChanged(); };
+  }
   const chip = $("#f-bin");
   chip.hidden = !state.f.bin;
   if (state.f.bin) {
@@ -151,7 +160,7 @@ function bindFilters() {
     $(`#f-${k}`).addEventListener("change", (e) => { state.f[k] = e.target.value; onFiltersChanged(); });
   }
   $("#f-clear").addEventListener("click", () => {
-    Object.assign(state.f, { q: "", genre: "", decade: "", format: "", bin: "" });
+    Object.assign(state.f, { q: "", genre: "", decade: "", format: "", bin: "", who: "" });
     onFiltersChanged();
   });
 }
@@ -436,6 +445,7 @@ function renderStats(main) {
     <div>${columns("By decade", `Release decade${undated ? `; ${fmtInt(undated)} without a year aren't shown` : ""}.`, decades, (d) => hashFor("list", { decade: String(d) }))}</div>
     <div>${barList("Most collected artists", "Excludes Various Artists compilations.", topArtists, (a) => hashFor("list", { q: a, genre: "", decade: "" , sort: "year" }))}</div>
     <div>${barList("Most collected labels", "First label credited on each release.", topLabels, (l) => hashFor("list", { q: l, genre: "", decade: "" }))}</div>
+    ${peopleSections(list)}
     <div class="wide">${valueSection(list)}</div>
     ${priciest.length ? `<div>${barList("Priciest to replace",
       `Cheapest copy currently for sale on Discogs. ${fmtInt(priced.length)} of ${fmtInt(list.length)} records have a price so far; prices refresh in rotation, about weekly.`,
@@ -446,6 +456,39 @@ function renderStats(main) {
   startFacts(main, buildFacts(list), list);
 }
 
+
+// ---- people behind the records
+function topPeople(list, re, n = 10) {
+  const counts = new Map();
+  for (const r of list) {
+    const names = new Set((r.credits || []).filter((c) => re.test(c.role)).map((c) => c.name));
+    for (const nm of names) if (!/^various$/i.test(nm)) counts.set(nm, (counts.get(nm) || 0) + 1);
+  }
+  return [...counts].filter(([, c]) => c > 1).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, n);
+}
+
+function peopleSections(list) {
+  const credited = list.filter((r) => r.credits?.length).length;
+  if (!credited) {
+    return `<div class="wide"><h2>People behind the records</h2><p class="sub">Producers, engineers and band family trees show up after the next Discogs sync.</p></div>`;
+  }
+  const producers = topPeople(list, /^(co-)?producer$|^produced by$/i);
+  const engineers = topPeople(list, /engineer|^recorded by$|^mixed by$/i);
+  const mastering = topPeople(list, /^mastered by$|^lacquer cut by$/i);
+  const note = credited < list.length ? ` Credits are in for ${fmtInt(credited)} of ${fmtInt(list.length)} records so far.` : "";
+  const ids = new Set(list.flatMap((r) => r.artist_ids || []));
+  const links = state.people.links.filter((l) => l.artists.filter((i) => ids.has(i)).length >= 2).slice(0, 12);
+  let html = "";
+  if (producers.length) html += `<div>${barList("Most credited producers", `Select a name to see their records.${note}`, producers, (k) => whoHref(k))}</div>`;
+  if (engineers.length) html += `<div>${barList("Most credited engineers", "Recording, engineering and mixing credits.", engineers, (k) => whoHref(k))}</div>`;
+  if (mastering.length) html += `<div>${barList("Mastered most often by", "Mastering and lacquer-cutting credits.", mastering, (k) => whoHref(k))}</div>`;
+  if (links.length) {
+    html += `<div><h2>Band family tree</h2><p class="sub">People who played in more than one band you own.</p>
+      <ul class="tree">${links.map((l) => `<li><a class="who" href="${whoHref(l.name)}">${esc(l.name)}</a>
+        <span>${l.artists.filter((i) => ids.has(i)).map((i) => `<a href="${artistHref(state.people.name.get(i))}">${esc(state.people.name.get(i))}</a>`).join(" · ")}</span></li>`).join("")}</ul></div>`;
+  }
+  return html;
+}
 
 // ---- collection value
 function valueSection(list) {
@@ -541,7 +584,7 @@ function buildFacts(list) {
   }
   const span = [...spans].sort((a, b) => (b[1][1] - b[1][0]) - (a[1][1] - a[1][0]))[0];
   if (span && span[1][1] - span[1][0] >= 10) {
-    add(`Your <b>${esc(span[0])}</b> records span ${span[1][1] - span[1][0]} years, from ${span[1][0]} to ${span[1][1]}.`);
+    add(`Your records by <b>${esc(span[0])}</b> span ${span[1][1] - span[1][0]} years, from ${span[1][0]} to ${span[1][1]}.`);
   }
   const labels = [...countBy(list, (r) => r.label)].filter(([l]) => l && !/^not on label/i.test(l)).sort((a, b) => b[1] - a[1]);
   if (labels.length && labels[0][1] > 2) add(`<b>${esc(labels[0][0])}</b> is the label you own the most of: ${labels[0][1]} records.`);
@@ -581,9 +624,128 @@ function buildFacts(list) {
   const qty = list.reduce((a, r) => a + (r.qty || 1), 0);
   const metres = qty * 0.0035; // an LP in its jacket is about 3.5 mm thick
   if (metres >= 1) add(`Stacked flat, your records would stand about ${Math.round(metres * 3.281)} feet (${metres.toFixed(1)} m) tall.`);
+  // ---- weight
+  const fallbackGrams = (r) => (r.qty || 1) * ({ Vinyl: 230, CD: 100, Cassette: 60 }[r.format] || 200);
+  const grams = list.reduce((a, r) => a + (r.weight || fallbackGrams(r)), 0);
+  const kg = grams / 1000;
+  if (kg >= 5) {
+    const things = [[30, "a Labrador retriever"], [70, "an adult person"], [100, "a newborn elephant"], [150, "a giant panda"],
+      [250, "a baby grand piano"], [300, "a grizzly bear"], [450, "a concert grand piano"], [550, "a horse"],
+      [700, "a dairy cow"], [1300, "a small car"], [2300, "a rhinoceros"]];
+    const [, thing] = things.reduce((best, t) => (Math.abs(Math.log(t[0] / kg)) < Math.abs(Math.log(best[0] / kg)) ? t : best));
+    add(`All together your records weigh about <b>${fmtInt(Math.round(kg))} kg</b> (${fmtInt(Math.round(kg * 2.205))} lb). That's roughly ${thing}.`);
+  }
+  // ---- people
+  const ids = new Set(list.flatMap((r) => r.artist_ids || []));
+  const nameOf = (i) => esc(state.people.name.get(i) || "?");
+  const plist = (arr) => arr.length > 2 ? `${arr.slice(0, -1).join(", ")} and ${arr[arr.length - 1]}` : arr.join(" and ");
+  const links = state.people.links.map((l) => ({ ...l, artists: l.artists.filter((i) => ids.has(i)) })).filter((l) => l.artists.length >= 2);
+  if (links.length) {
+    const bands = new Set(links.flatMap((l) => l.artists));
+    add(`<b>${fmtInt(bands.size)} artists</b> in your collection share at least one member with another artist you own.`);
+    const top = links[0];
+    const shown = top.artists.slice(0, 4).map(nameOf);
+    if (top.artists.length > 4) shown.push(`${top.artists.length - 4} more`);
+    add(`<a href="${whoHref(top.name)}">${esc(top.name)}</a> connects ${plist(shown)} in your collection.`);
+    if (links.length > 1) {
+      const l = links[1 + Math.floor(Math.random() * (links.length - 1))];
+      add(`<a href="${whoHref(l.name)}">${esc(l.name)}</a> played in both ${nameOf(l.artists[0])} and ${nameOf(l.artists[1])}.`);
+    }
+  }
+  const prod = topPeople(list, /^(co-)?producer$|^produced by$/i, 1)[0];
+  if (prod) add(`<a href="${whoHref(prod[0])}">${esc(prod[0])}</a> produced ${prod[1]} of your records, more than anyone else.`);
+  const eng = topPeople(list, /engineer|^recorded by$|^mixed by$/i, 1)[0];
+  if (eng) add(`<a href="${whoHref(eng[0])}">${esc(eng[0])}</a> recorded, engineered or mixed ${eng[1]} of your records.`);
+  const mast = topPeople(list, /^mastered by$|^lacquer cut by$/i, 1)[0];
+  if (mast && mast[1] >= 3) add(`${mast[1]} of your records were mastered by <a href="${whoHref(mast[0])}">${esc(mast[0])}</a>.`);
+  // ---- Discogs community
+  const comm = list.filter((r) => r.community && r.community.have > 0);
+  if (comm.length) {
+    const rare = comm.reduce((a, b) => (b.community.have < a.community.have ? b : a));
+    add(`Only ${fmtInt(rare.community.have)} people on Discogs own ${by(rare)}. You're one of them.`);
+    const wanted = comm.reduce((a, b) => (b.community.want > a.community.want ? b : a));
+    add(`${by(wanted)} is on <b>${fmtInt(wanted.community.want)}</b> Discogs wantlists.`);
+    const common = comm.reduce((a, b) => (b.community.have > a.community.have ? b : a));
+    add(`${by(common)} is in ${fmtInt(common.community.have)} Discogs collections, the most common record you own.`);
+    const rated = comm.filter((r) => r.community.votes >= 25);
+    if (rated.length) {
+      const best = rated.reduce((a, b) => (b.community.rating > a.community.rating ? b : a));
+      add(`Discogs users rate ${by(best)} the highest of anything you own: ${best.community.rating.toFixed(2)} out of 5.`);
+    }
+  }
+  // ---- pressings
+  const plants = [...countBy(list, (r) => (r.companies || []).filter((c) => /pressed by/i.test(c.role)).map((c) => c.name))].sort((a, b) => b[1] - a[1]);
+  if (plants.length && plants[0][1] >= 3) add(`${plants[0][1]} of your records were pressed at <b>${esc(plants[0][0])}</b>.`);
+  const vinyl = list.filter((r) => r.format === "Vinyl");
+  const fmtTxt = (r) => `${r.format_detail || ""} ${r.format_text || ""}`;
+  const COLOR = /\b(red|blue|green|yellow|orange|purple|pink|white|clear|gold|silver|gr[ae]y|brown|bone|cream|teal|aqua|olive|tan|magenta|violet|maroon|turquoise|lavender|mint|coke bottle|picture disc)\b/gi;
+  const colorWords = new Map();
+  let colored = 0;
+  for (const r of vinyl) {
+    const words = [...new Set((fmtTxt(r).match(COLOR) || []).map((w) => w.toLowerCase().replace("grey", "gray")))];
+    if (words.length) { colored++; for (const w of words) colorWords.set(w, (colorWords.get(w) || 0) + 1); }
+  }
+  if (colored >= 3) {
+    const fav = [...colorWords].sort((a, b) => b[1] - a[1])[0][0];
+    add(`<b>${fmtInt(colored)}</b> of your records are on colored vinyl. The most popular color is ${esc(fav)}.`);
+  }
+  const heavy = vinyl.filter((r) => /180\s*g/i.test(fmtTxt(r))).length;
+  if (heavy >= 3) add(`${fmtInt(heavy)} of your records are pressed on heavyweight 180-gram vinyl.`);
+  const reissues = list.filter((r) => /reissue|repress/i.test(r.format_detail || "")).length;
+  if (reissues >= 5) add(`${pct(reissues)}% of your records are reissues or represses.`);
+  const tests = list.filter((r) => /test pressing/i.test(fmtTxt(r)));
+  if (tests.length) add(`You own ${tests.length === 1 ? "a test pressing" : `${tests.length} test pressings`}, including ${by(tests[0])}.`);
+  const limited = list.filter((r) => /limited edition/i.test(r.format_detail || "")).length;
+  if (limited >= 5) add(`${fmtInt(limited)} of your records are limited editions.`);
+  const discs = vinyl.reduce((a, r) => a + (r.qty || 1), 0);
+  if (discs > vinyl.length) add(`Counting double albums and box sets, that's ${fmtInt(discs)} slabs of vinyl and ${fmtInt(discs * 2)} sides to flip.`);
+  const countries = [...countBy(list, (r) => r.country)].sort((a, b) => b[1] - a[1]);
+  if (countries.length >= 3) add(`Your records were pressed for ${countries.length} countries and regions. Most are from ${/^(US|UK)$/.test(countries[0][0]) ? "the " : ""}${esc(countries[0][0])}.`);
+  // ---- time
+  const lags = withYear.filter((r) => r.date_added && r.year >= 1900).map((r) => [r, +r.date_added.slice(0, 4) - r.year]).filter(([, l]) => l >= 0);
+  if (lags.length) {
+    const [r, lag] = lags.reduce((a, b) => (b[1] > a[1] ? b : a));
+    if (lag >= 10) add(`You added ${by(r)} to your collection ${lag} years after it came out.`);
+  }
+  if (withYear.length) {
+    const avgAge = Math.round(withYear.reduce((a, r) => a + (new Date().getFullYear() - r.year), 0) / withYear.length);
+    add(`The average record on your shelves is ${avgAge} years old.`);
+  }
+  // ---- alphabet & titles & tracks
+  const letters = new Map();
+  for (const a of artists.keys()) { const L = firstLetter(a); if (L !== "#") letters.set(L, (letters.get(L) || 0) + 1); }
+  const missing = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").filter((L) => !letters.has(L));
+  if (missing.length && missing.length <= 6) add(`No artist in your collection starts with ${plist(missing)}.`);
+  const busiestL = [...letters].sort((a, b) => b[1] - a[1])[0];
+  if (busiestL) add(`${busiestL[0]} is your most crowded letter: ${busiestL[1]} artists file under it.`);
+  const STOP = new Set("the and of a an in on to for from with my your our is it at by vol volume live part edition remastered deluxe".split(" "));
+  const words = new Map();
+  for (const r of list) for (const w of new Set(r.title.toLowerCase().match(/[a-z']{4,}/g) || [])) if (!STOP.has(w)) words.set(w, (words.get(w) || 0) + 1);
+  const word = [...words].sort((a, b) => b[1] - a[1])[0];
+  if (word && word[1] >= 4) add(`The word “${esc(word[0])}” turns up in ${word[1]} of your album titles.`);
+  let shortest = null, longestT = null, mostTracks = null;
+  for (const r of list) {
+    if (!mostTracks || r.tracklist.length > mostTracks.tracklist.length) mostTracks = r;
+    for (const t of r.tracklist) {
+      const sec = parseDur(t.duration);
+      if (sec >= 1 && (!shortest || sec < shortest[2])) shortest = [r, t, sec];
+      if (sec >= 1 && (!longestT || sec > longestT[2])) longestT = [r, t, sec];
+    }
+  }
+  const mmss = (x) => `${Math.floor(x / 60)}:${String(x % 60).padStart(2, "0")}`;
+  if (shortest && shortest[2] < 60) add(`The shortest track you own is “${esc(shortest[1].title)}” on ${by(shortest[0])}, all ${mmss(shortest[2])} of it.`);
+  if (longestT && longestT[2] > 900) add(`The longest single track you own is “${esc(longestT[1].title)}” on ${by(longestT[0])}, at ${mmss(longestT[2])}.`);
+  if (mostTracks && mostTracks.tracklist.length >= 25) add(`${by(mostTracks)} packs in ${mostTracks.tracklist.length} tracks, more than any other record you own.`);
+  if (styles.length >= 10) add(`Your records cover ${fmtInt(styles.length)} different styles.`);
+  // ---- shelves
+  if (state.shelves && Object.keys(state.shelves.starts).length) {
+    const bins = [...countBy(list.filter((r) => /^\d+$/.test(r._bin || "")), (r) => r._bin)].sort((a, b) => b[1] - a[1]);
+    if (bins.length) add(`${esc(binName(bins[0][0]))} is your fullest cubby, with ${bins[0][1]} records.`);
+  }
   // money
   const h = state.meta.value_history || [];
   if (h.length && h[h.length - 1].display?.median) add(`Discogs puts your collection's median value at <b>${esc(h[h.length - 1].display.median)}</b>.`);
+  if (h.length && h[h.length - 1].median && kg >= 5) add(`Pound for pound, your collection is worth about ${money(h[h.length - 1].median / (kg * 2.205))} per pound.`);
   const priced = list.filter((r) => r.price?.lowest != null).sort((a, b) => b.price.lowest - a.price.lowest);
   if (priced.length) add(`Hardest to replace: ${by(priced[0])}. The cheapest copy for sale right now is ${money(priced[0].price.lowest, priced[0].price.currency)}.`);
   const pick = list[Math.floor(Math.random() * n)];
@@ -865,17 +1027,19 @@ function openDetail(uid, list = state.filtered) {
       <dl class="facts-list">
         ${fact("Released", esc([r.released && r.released !== String(r.year) ? r.released : r.year, r.country].filter(Boolean).join(", ")))}
         ${fact("Label", r.label ? `<a href="${hashFor("list", { q: r.label, genre: "", decade: "", format: "" })}">${esc(r.label)}</a>${r.catno ? ` <span class="num">${esc(r.catno)}</span>` : ""}` : "")}
-        ${fact("Format", esc([r.format, r.format_detail].filter(Boolean).join(", ")))}
+        ${fact("Format", esc([r.format, r.format_detail, r.format_text].filter(Boolean).join(", ")))}
         ${fact("Genre", r.genres.length ? `<span class="chips">${r.genres.map((g) => `<a class="chip" href="${hashFor("list", { genre: g, q: "", decade: "" })}">${esc(g)}</a>`).join("")}</span>` : "")}
         ${fact("Style", esc(r.styles.join(", ")))}
         ${fact("Added", esc(added))}
         ${priceFact(r)}
+        ${communityFact(r)}
         <dt><label for="d-bin">Bin</label></dt>
         <dd class="bin-field"><input id="d-bin" value="${esc(r.bin)}" maxlength="40" placeholder="${esc(r.bin ? "" : (r._bin ? binName(r._bin) : "—"))}" list="bin-labels" autocomplete="off" ${state.meta.can_edit ? "" : "disabled"}><small id="d-bin-msg">${binHelp(r)}</small></dd>
       </dl>
       <div class="tracks"><h3>Tracklist</h3>${tracks.length
         ? `<ol>${tracks.map((t, n) => `<li><span class="pos">${esc(t.position || n + 1)}</span><span>${esc(t.title)}</span><span class="dur">${esc(t.duration)}</span></li>`).join("")}</ol>`
         : `<p class="none">No tracklist yet. It's filled in by the next Discogs sync.</p>`}</div>
+      ${creditsHtml(r)}
       <div class="d-nav">
         <button type="button" class="btn" id="d-prev" ${prev ? "" : "disabled"}>Previous</button>
         <button type="button" class="btn" id="d-next" ${next ? "" : "disabled"}>Next</button>
@@ -947,6 +1111,106 @@ function bindDetail() {
   });
 }
 
+
+// ------------------------------------------------------------------ people
+// Who's on each record (credits, the artist, the band's members), and which artists in the
+// collection are connected because the same person played in both.
+const whoHref = (name) => hashFor("list", { who: name, q: "", genre: "", decade: "", format: "", bin: "", sort: "year" });
+const artistHref = (name) => hashFor("list", { q: name, who: "", genre: "", decade: "", format: "", bin: "", sort: "year" });
+
+function computePeople() {
+  const A = state.meta.artists || {};
+  const name = new Map();            // collection artist id -> display name
+  const recordsBy = new Map();       // collection artist id -> record count
+  for (const r of state.records) {
+    for (const id of r.artist_ids || []) {
+      recordsBy.set(id, (recordsBy.get(id) || 0) + 1);
+      if (!name.has(id)) name.set(id, (A[id]?.name) || (r.artist_ids.length === 1 ? r.artist : ""));
+    }
+  }
+  // person id -> { name, artists: Set(collection artist ids they're part of) }
+  const persons = new Map();
+  const join = (pid, pname, aid) => {
+    if (!persons.has(pid)) persons.set(pid, { id: pid, name: pname, artists: new Set() });
+    persons.get(pid).artists.add(aid);
+  };
+  for (const [idStr, a] of Object.entries(A)) {
+    const id = +idStr;
+    if (!recordsBy.has(id)) continue;
+    for (const m of a.members || []) join(m.id, m.name, id);                     // band -> members
+    for (const g of a.groups || []) if (recordsBy.has(g.id)) { join(id, a.name, id); join(id, a.name, g.id); } // person -> bands
+  }
+  const links = [...persons.values()].filter((p) => p.artists.size >= 2)
+    .map((p) => ({ ...p, artists: [...p.artists].filter((i) => name.get(i)) }))
+    .filter((p) => p.artists.length >= 2)
+    .sort((x, y) => y.artists.length - x.artists.length || x.name.localeCompare(y.name));
+  const byArtist = new Map();        // collection artist id -> links touching it
+  for (const l of links) for (const id of l.artists) { if (!byArtist.has(id)) byArtist.set(id, []); byArtist.get(id).push(l); }
+  state.people = { links, name, recordsBy, byArtist };
+  for (const r of state.records) {
+    const set = new Set([r.artist.toLowerCase()]);
+    for (const c of r.credits || []) set.add(c.name.toLowerCase());
+    for (const id of r.artist_ids || []) for (const m of A[id]?.members || []) set.add(m.name.toLowerCase());
+    r._people = set;
+  }
+}
+
+const KEY_ROLES = [
+  ["Produced by", /^(co-)?producer$|^produced by$/i],
+  ["Recorded by", /^recorded by$|^recording$/i],
+  ["Engineered by", /engineer/i],
+  ["Mixed by", /^mixed by$/i],
+  ["Mastered by", /^mastered by$|^lacquer cut by$/i],
+];
+
+function creditsHtml(r) {
+  const credits = r.credits || [];
+  const A = state.meta.artists || {};
+  const out = [];
+  // the band, and where its people turn up elsewhere in the collection
+  for (const id of r.artist_ids || []) {
+    const a = A[id];
+    if (!a) continue;
+    if (a.members?.length) {
+      const current = a.members.filter((m) => m.active), past = a.members.filter((m) => !m.active);
+      const fmt = (list) => list.map((m) => `<a href="${whoHref(m.name)}">${esc(m.name)}</a>`).join(", ");
+      out.push(`<dt>Members</dt><dd>${fmt(current.length ? current : past)}${current.length && past.length ? ` <span class="muted">· formerly ${fmt(past)}</span>` : ""}</dd>`);
+    }
+    const links = state.people.byArtist.get(id) || [];
+    const others = [];
+    for (const l of links) for (const other of l.artists) if (other !== id) others.push([l.name, other]);
+    if (others.length) {
+      const seen = new Set();
+      const items = others.filter(([, o]) => !seen.has(o) && seen.add(o)).slice(0, 8)
+        .map(([p, o]) => `<a href="${artistHref(state.people.name.get(o))}">${esc(state.people.name.get(o))}</a> <span class="muted">(${esc(p)})</span>`);
+      out.push(`<dt>Related</dt><dd>${items.join(", ")}</dd>`);
+    }
+  }
+  for (const [label, re] of KEY_ROLES) {
+    const names = [...new Set(credits.filter((c) => re.test(c.role)).map((c) => c.name))];
+    if (names.length) out.push(`<dt>${label}</dt><dd>${names.slice(0, 6).map((n) => `<a href="${whoHref(n)}">${esc(n)}</a>`).join(", ")}${names.length > 6 ? ` +${names.length - 6}` : ""}</dd>`);
+  }
+  const plant = (r.companies || []).find((c) => /pressed by/i.test(c.role));
+  if (plant) out.push(`<dt>Pressed at</dt><dd>${esc(plant.name)}</dd>`);
+  const rest = credits.filter((c) => !KEY_ROLES.some(([, re]) => re.test(c.role)));
+  let more = "";
+  if (rest.length) {
+    const byRole = new Map();
+    for (const c of rest) { if (!byRole.has(c.role)) byRole.set(c.role, []); byRole.get(c.role).push(c.name); }
+    more = `<details class="all-credits"><summary>All credits (${credits.length})</summary><dl class="facts-list">${
+      [...byRole].map(([role, names]) => `<dt>${esc(role)}</dt><dd>${[...new Set(names)].map((n) => `<a href="${whoHref(n)}">${esc(n)}</a>`).join(", ")}</dd>`).join("")}</dl></details>`;
+  }
+  if (!out.length && !more) return "";
+  return `<div class="credits"><h3>People</h3><dl class="facts-list">${out.join("")}</dl>${more}</div>`;
+}
+
+function communityFact(r) {
+  const c = r.community;
+  if (!c) return "";
+  const bits = [`${fmtInt(c.have)} own it`, `${fmtInt(c.want)} want it`];
+  if (c.votes >= 5) bits.push(`rated ${c.rating.toFixed(1)} of 5 by ${fmtInt(c.votes)}`);
+  return `<dt>On Discogs</dt><dd>${bits.join(" · ")}</dd>`;
+}
 
 // ------------------------------------------------------------------ bins & filing
 // Every record lives in one bin: a hand-set bin wins; otherwise new records sit on the
@@ -1214,6 +1478,7 @@ async function load() {
     state.byUid = new Map(state.records.map((r) => [r.uid, r]));
     state.error = null;
     computeBins();
+    computePeople();
   } catch (err) {
     state.error = err instanceof TypeError ? "The server couldn't be reached. Is the record-collection service running?" : esc(err.message);
   }

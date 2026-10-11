@@ -9,7 +9,8 @@ A small web app for browsing a vinyl collection that lives on Discogs. It runs o
 - **Back covers:** Discogs doesn't label which photo is the back (uploaders add them in any order), so you pick it. Open a photo and choose **Use as back cover**. After that, clicking the cover flips between front and back. You only do this once per record.
 - **Shelves** draws your actual shelving units. Each cubby shows its records as spines, colored from their covers. Click a cubby to flip through just that bin. Records file themselves alphabetically (see [Filing records on your shelves](#filing-records-on-your-shelves)), and there's a **New arrivals** pile for recent additions.
 - **Collection value:** the Stats page shows Discogs' estimate of what your collection is worth, tracked over time, plus the records that would cost the most to replace. Each record shows the cheapest copy currently for sale, with a small price-history line.
-- **Factoids** at the top of Stats rotate through things like "Your most collected artist is Tom Waits, with 20 records" and "Stacked flat, your records would stand 12 feet tall."
+- **Factoids** at the top of Stats rotate through 45+ kinds: band members you own across several bands, your most-credited producer, the rarest and most-wanted records you own, total weight ("about a grizzly bear"), colored vinyl, pressing plants, shortest track, and more.
+- **People:** each record lists its band members, related bands in your collection (shared members), and producer, engineer and mastering credits. Click any name to see every record they're on. Stats shows the most credited producers and engineers, plus a **band family tree** of people who played in more than one band you own.
 - **Surprise me** opens a random record from whatever you're currently viewing.
 - **Sync now** (the circular-arrows button) pulls changes from Discogs immediately instead of waiting for the nightly sync.
 - Search covers artist, title, label, catalog number, style, and track names. You can also filter by genre, decade, and format. Every view can be linked to, filters and open record included.
@@ -239,6 +240,8 @@ tests/
 
 Sync options: `.venv/bin/python -m app.sync --help`. They include `--details-limit N`, `--prices N`, `--no-images` and `--refresh-details`. Only one sync runs at a time: if the nightly sync and the **Sync now** button overlap, the second one steps aside.
 
+**About people data:** credits, pressing details and community counts come from each release's Discogs page. Band members come from each artist's page, looked up 300 artists per sync (`RC_ARTIST_REFRESH`) and refreshed every 90 days.
+
 **About prices:** "collection value" is Discogs' own minimum, median and maximum estimate, based on what copies of your releases have sold for. It's recorded once a day. A record's price is the cheapest copy currently listed for sale on Discogs. That's a rough replacement cost, not what yours would sell for, and condition matters a lot. Prices are refreshed in a rolling batch each night.
 
 ### API
@@ -251,6 +254,7 @@ Sync options: `.venv/bin/python -m app.sync --help`. They include `--details-lim
 | `PUT /api/backs/<release_id>` | `{"photo": 2}` marks Discogs photo 2 as the back cover; `{"photo": null}` clears it. Same edit-token rule |
 | `GET/POST /api/sync` | sync status / start a sync now (same edit-token rule) |
 | `GET /api/prices/<release_id>` | that record's lowest-price history |
+| `GET /api/collection` → `artists` | band members / groups per Discogs artist id |
 | `GET/PUT /api/shelves` | shelf layout, cubby first artists, new-arrivals date |
 | `GET /img/<release_id>/<n>` | Discogs photo *n* (0 = front; `front` and `back` also work). Add `?size=thumb` for a 320px version. Photos are fetched from Discogs the first time they're viewed |
 
