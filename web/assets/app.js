@@ -137,6 +137,8 @@ function reflectFilters() {
   $("#f-q").value = state.f.q;
   for (const k of ["genre", "decade", "format", "sort"]) $(`#f-${k}`).value = state.f[k];
   $("#f-clear").hidden = !(state.f.q || state.f.genre || state.f.decade || state.f.format || state.f.bin || state.f.who);
+  const picked = ["genre", "decade", "format"].filter((k) => state.f[k]).length + (state.f.sort !== "added" ? 1 : 0);
+  $("#f-count").textContent = picked ? String(picked) : "";
   const wchip = $("#f-who");
   wchip.hidden = !state.f.who;
   if (state.f.who) {
@@ -153,6 +155,10 @@ function reflectFilters() {
 
 function bindFilters() {
   let t;
+  $("#f-toggle").addEventListener("click", () => {
+    const open = $("#filters").classList.toggle("open");
+    $("#f-toggle").setAttribute("aria-expanded", String(open));
+  });
   $("#f-q").addEventListener("input", (e) => {
     clearTimeout(t);
     t = setTimeout(() => { state.f.q = e.target.value.trim(); onFiltersChanged(); }, 140);
@@ -389,7 +395,7 @@ function renderList(main) {
       <span class="y">${r.year || ""}</span>
       <span class="l">${esc(r.label)}</span>
       <span class="g">${esc(r.genres[0] || "")}</span>
-      <span class="b">${esc(r.bin)}</span>
+      <span class="b">${r._bin ? esc(/^\d+$/.test(r._bin) ? `Bin ${r._bin}` : r._bin) : ""}</span>
     </button>`;
   }
   html += `</div>`;
@@ -440,7 +446,7 @@ function renderStats(main) {
   const priciest = [...priced].sort((a, b) => b.price.lowest - a.price.lowest).slice(0, 10);
 
   main.innerHTML = `<section class="stats" aria-label="Stats">
-    <div class="wide facts" id="facts"></div>
+    <div class="wide fact-box" id="facts"></div>
     <div class="wide">${growthChart(dated)}</div>
     <div>${barList("By genre", "Primary Discogs genre. Select a bar to list those records.", genres, (g) => hashFor("list", { genre: g === "Unknown" ? "" : g, q: "" }))}</div>
     <div>${columns("By decade", `Release decade${undated ? `; ${fmtInt(undated)} without a year aren't shown` : ""}.`, decades, (d) => hashFor("list", { decade: String(d) }))}</div>
