@@ -33,7 +33,7 @@ WEB_DIR = ROOT / "web"
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN", "").strip()
 DISCOGS_USERNAME = os.environ.get("DISCOGS_USERNAME", "").strip()
 DISCOGS_USER_AGENT = os.environ.get(
-    "DISCOGS_USER_AGENT", "RecordCollection/2.0 +https://github.com/glyphic-sentry/record-collection"
+    "DISCOGS_USER_AGENT", "RecordCollection/2.0 +https://github.com/Glyphic-HA/records"
 )
 
 # Set to "0" to stop the web server from contacting Discogs for missing covers.

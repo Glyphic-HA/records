@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# One-shot installer for a Raspberry Pi (or any Debian-ish box with systemd).
-# Safe to re-run: it updates dependencies and service files in place.
+# Installer for Raspberry Pi OS (or any Debian-based system with systemd).
+# Safe to re-run any time: it updates dependencies and service files in place.
 #
-#   ./deploy/setup.sh            # app on http://<pi>:8000, nightly sync at 04:00
-#   ./deploy/setup.sh --nginx    # also put it on port 80 via nginx
+#   ./deploy/setup.sh            # app on http://<hostname>.local:8000, nightly sync at ~04:00
+#   ./deploy/setup.sh --nginx    # also serve it on port 80 (http://<hostname>.local)
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,42 +11,53 @@ USER_NAME="${SUDO_USER:-$(id -un)}"
 PORT="${PORT:-8000}"
 WITH_NGINX=0
 [[ "${1:-}" == "--nginx" ]] && WITH_NGINX=1
-# The old version installed an nginx site with this name that serves a stale build; replace it.
-[[ -e /etc/nginx/sites-enabled/record-collection ]] && WITH_NGINX=1
+[[ -e /etc/nginx/sites-enabled/record-collection ]] && WITH_NGINX=1  # keep it on once enabled
 
 cd "$DIR"
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
-say "1/5  Python environment"
-if ! python3 -c 'import venv, ensurepip' 2>/dev/null; then
-  sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv
+if [[ $EUID -eq 0 && -z "${SUDO_USER:-}" ]]; then
+  echo "Run this as your normal user (it uses sudo where needed), not as root."
+  exit 1
 fi
+
+say "1/4  System packages"
+NEED=()
+python3 -c 'import venv, ensurepip' 2>/dev/null || NEED+=(python3-venv)
+command -v git >/dev/null || NEED+=(git)
+if ((${#NEED[@]})); then
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq "${NEED[@]}"
+else
+  echo "Already installed."
+fi
+
+say "2/4  Python packages (a few minutes the first time on a Pi)"
 [[ -d .venv ]] || python3 -m venv .venv
 .venv/bin/pip install -q --upgrade pip
 .venv/bin/pip install -q -r requirements.txt
+mkdir -p data/images
 
-say "2/5  Settings"
+say "3/4  Discogs settings"
 if [[ ! -f .env ]]; then
   cp .env.example .env
   chmod 600 .env
-  echo "Created .env. Add DISCOGS_USERNAME and DISCOGS_TOKEN to it, then re-run this script."
 fi
-mkdir -p data/images
+if ! grep -q '^DISCOGS_USERNAME=.\+' .env || ! grep -q '^DISCOGS_TOKEN=.\+' .env; then
+  cat <<MSG
+Almost there. Add your Discogs username and token to the settings file:
 
-say "3/5  Data"
-if [[ ! -s data/collection.json && -s backend/collection.json ]]; then
-  echo "Found the old app's backend/collection.json; importing it (covers too)."
-  BINS_ARG=()
-  [[ -f backend/bin_store.json ]] && BINS_ARG=(--bins backend/bin_store.json)
-  .venv/bin/python -m app.sync import-legacy backend/collection.json \
-      --images backend/static/images "${BINS_ARG[@]}"
-elif [[ -s data/collection.json ]]; then
-  echo "data/collection.json already present; leaving it alone."
-else
-  echo "No data yet. The first Discogs sync (step 5) will create it."
+    nano $DIR/.env
+
+(save with Ctrl+O, Enter, then Ctrl+X) and run this script again:
+
+    ./deploy/setup.sh
+MSG
+  exit 0
 fi
+echo "Found DISCOGS_USERNAME and DISCOGS_TOKEN in .env."
 
-say "4/5  Services"
+say "4/4  Services"
 render() { sed -e "s|@USER@|$USER_NAME|g" -e "s|@DIR@|$DIR|g" -e "s|@PORT@|$PORT|g" "$1"; }
 for unit in record-collection.service record-collection-sync.service record-collection-sync.timer; do
   render "deploy/$unit" | sudo tee "/etc/systemd/system/$unit" >/dev/null
@@ -63,16 +74,23 @@ if [[ $WITH_NGINX == 1 ]]; then
   sudo nginx -t && sudo systemctl reload nginx
 fi
 
-say "5/5  First sync"
-if grep -q '^DISCOGS_TOKEN=.\+' .env && grep -q '^DISCOGS_USERNAME=.\+' .env; then
-  echo "Starting a Discogs sync in the background (first run takes ~20 min for 1,000 records)."
-  echo "Follow along with:  journalctl -u record-collection-sync -f"
+# First sync (or a catch-up after an update) runs in the background.
+if [[ ! -s data/collection.json ]] || ! systemctl is-active --quiet record-collection-sync.service; then
   sudo systemctl start --no-block record-collection-sync.service
+  SYNC_NOTE="A Discogs sync is running in the background. Watch it with:
+    journalctl -u record-collection-sync -f"
 else
-  echo "Skipped: DISCOGS_USERNAME / DISCOGS_TOKEN not set in .env yet."
+  SYNC_NOTE="A sync is already running."
 fi
 
-HOST="$(hostname).local"
-URL="http://$HOST:$PORT"
-[[ $WITH_NGINX == 1 ]] && URL="http://$HOST"
-say "Done. Open $URL"
+sleep 2
+if systemctl is-active --quiet record-collection.service; then
+  URL="http://$(hostname).local:$PORT"
+  [[ $WITH_NGINX == 1 ]] && URL="http://$(hostname).local"
+  say "Done. Open $URL"
+  echo "$SYNC_NOTE"
+else
+  say "The web app didn't start. Recent log:"
+  sudo journalctl -u record-collection -n 30 --no-pager
+  exit 1
+fi

@@ -1,6 +1,6 @@
 # Records
 
-A small web app for browsing a vinyl collection that lives on Discogs. Meant to run on a Raspberry Pi at home.
+A small web app for browsing a vinyl collection that lives on Discogs. It runs on a Raspberry Pi at home, and you open it from any browser on your network.
 
 - **Gallery** works like flipping through a crate. Drag, scroll, or use the arrow keys, then click the front record.
 - **List** is sortable by artist, title, or year. A–Z sorts get bin-divider letters ("The" is ignored when filing).
@@ -8,66 +8,197 @@ A small web app for browsing a vinyl collection that lives on Discogs. Meant to 
 - **Record details** include front and back covers (click to flip), the tracklist, label and catalog number, and a link to Discogs. There's also a **Bin** field for noting where a record lives on your shelf.
 - Search covers artist, title, label, catalog number, style, and track names. You can also filter by genre, decade, and format. Every view can be linked to, filters and open record included.
 - Dark and light themes, and it works on a phone.
+- A nightly sync picks up records you've added on Discogs.
 
-It's a Flask app with a plain-JavaScript frontend, so there's **no npm or build step**. Your collection is stored as one JSON file, and the cover art is cached on disk.
+It's Flask with a plain-JavaScript frontend, so there's **no npm or build step**. The collection is stored as one JSON file, and cover art is cached on the Pi.
 
-```
-app/        server.py (API + pages), sync.py (Discogs sync CLI), discogs.py, images.py, store.py
-web/        index.html + assets/ (the whole frontend)
-deploy/     setup.sh, systemd units (web app + nightly sync timer), optional nginx config
-data/       collection.json, bins.json, images/   ← created at runtime, not in git
-tests/
-```
+---
 
-## Install on the Pi
+## Setup: from a blank SD card to a running app
+
+Plan on about 30 minutes, plus 20 or so for the first sync to download your collection.
+
+### What you need
+
+- A Raspberry Pi 3B+, 4, 5, or Zero 2 W, with its power supply
+- A microSD card, 16 GB or larger (covers for ~1,000 records take about 150 MB)
+- A computer with an SD card reader
+- Wi-Fi or an Ethernet cable for the Pi
+- Your Discogs account
+
+### 1. Get your Discogs details
+
+1. Sign in at [discogs.com](https://www.discogs.com). Your **username** is the name in your profile URL (`discogs.com/user/<username>`).
+2. Go to **Settings → Developers** ([discogs.com/settings/developers](https://www.discogs.com/settings/developers)) and click **Generate new token**. Copy it somewhere safe. It's like a password, so never put it in git or share it.
+
+### 2. Flash the SD card
+
+1. Install **Raspberry Pi Imager** from [raspberrypi.com/software](https://www.raspberrypi.com/software/) and open it.
+2. **Device:** pick your Pi model.
+3. **Operating system:** choose **Raspberry Pi OS (other) → Raspberry Pi OS Lite (64-bit)**. Lite has no desktop, which is all a server needs. On a Pi 3B+ or Zero 2 W, the 64-bit Lite image is still the right pick.
+4. **Storage:** pick your SD card. Double-check it's the card, because everything on it will be erased.
+5. **Customise.** Imager asks for settings before writing. Fill these in:
+   - **Hostname:** `records`. This is how you'll reach it later (`records.local`).
+   - **Location:** your time zone (e.g. America/Los_Angeles) and keyboard layout. The time zone controls when the nightly sync runs.
+   - **User account:** a username and password. The examples below use `eli`.
+   - **Wireless LAN:** your Wi-Fi name, password, and country. Skip this if you're using Ethernet.
+   - **Remote access:** turn on **SSH** with password authentication. This is how you'll control the Pi from your computer.
+   - Skip Raspberry Pi Connect and interface options.
+6. **Write**, wait for it to finish and verify, then eject the card.
+
+### 3. Boot the Pi and connect to it
+
+1. Put the card in the Pi, connect Ethernet if you're using it, and plug in power. Give it **2–3 minutes**, because the first boot is slow.
+2. On your computer, open a terminal. On Windows, that's **PowerShell** (Start menu → type "PowerShell"). On a Mac, it's **Terminal**.
+3. Connect:
+   ```bash
+   ssh eli@records.local
+   ```
+   Type `yes` when it asks about the host's authenticity, then enter the password you set in Imager. If `records.local` isn't found, see [Troubleshooting](#troubleshooting).
+
+Every command from here on runs **on the Pi**, in that SSH window.
+
+### 4. Update the system and install git
 
 ```bash
-git clone https://github.com/glyphic-sentry/record-collection.git
-cd record-collection
-./deploy/setup.sh                     # creates .env on the first run
-nano .env                             # set DISCOGS_USERNAME and DISCOGS_TOKEN
-./deploy/setup.sh                     # installs services and starts the first sync
+sudo apt update && sudo apt full-upgrade -y
+sudo apt install -y git
 ```
 
-Then open `http://<pi-hostname>.local:8000`. Use `./deploy/setup.sh --nginx` to serve it on plain port 80 instead.
-
-Get a token at **Discogs → Settings → Developers → Generate new token**. The token goes in `.env`, which is git-ignored. Don't commit it.
-
-The first sync pulls your whole collection, then looks up each release for its tracklist and back cover. Discogs allows about 60 requests a minute, so ~1,000 records take about 20 minutes. Progress is saved as it goes. After that, a systemd timer syncs every night at 4 am and only fetches what's new.
-
-## Moving from the old version
-
-If the Pi already has the old app checked out at `~/record-collection`:
+### 5. Install the app
 
 ```bash
-cd ~/record-collection
-sudo systemctl disable --now record-collection.service   # the old, crash-looping one
-crontab -l | grep -v collection_importer | crontab -     # remove the old nightly cron job
-git fetch origin && git checkout rebuild                 # or main, once merged
+cd ~
+git clone https://github.com/Glyphic-HA/records.git
+cd records
 ./deploy/setup.sh
 ```
 
-`setup.sh` finds the old `backend/collection.json` and `backend/static/images/` and imports them, so your covers show up right away without re-downloading. It also replaces the old nginx site, which was serving a broken build. The old `backend/` and `frontend/` folders are left in place (git-ignored), so delete them once you're happy.
-
-You can also run the import by hand:
+The first run installs Python packages, which takes a few minutes on a Pi. It then creates a settings file called `.env` and stops to ask for your Discogs details. Open the file:
 
 ```bash
-.venv/bin/python -m app.sync import-legacy backend/collection.json --images backend/static/images
+nano .env
 ```
 
-## Everyday commands
+Fill in the two lines:
+
+```
+DISCOGS_USERNAME=your-discogs-username
+DISCOGS_TOKEN=the-token-you-generated
+```
+
+Save with **Ctrl+O**, then **Enter**, then exit with **Ctrl+X**. Run setup again:
 
 ```bash
-sudo systemctl start record-collection-sync     # sync now
+./deploy/setup.sh
+```
+
+This time it installs the app as a service that starts on boot, sets up the nightly sync, and starts the first sync in the background.
+
+### 6. Open it
+
+From any phone or computer on your network, go to **http://records.local:8000**
+
+Records appear right away, and covers fill in as they download. Tracklists and back covers arrive over about the next 20 minutes for a ~1,000-record collection, because Discogs limits how fast apps can ask for data. You can watch the progress:
+
+```bash
+journalctl -u record-collection-sync -f      # Ctrl+C to stop watching
+```
+
+That's it. The Pi syncs with Discogs every night at about 4 am, so anything you add on Discogs shows up the next day. Reload the page to see it.
+
+### Optional: drop the `:8000`
+
+To use plain **http://records.local**, run:
+
+```bash
+./deploy/setup.sh --nginx
+```
+
+### Optional: give the Pi a fixed address
+
+`records.local` works on most home networks. If a device can't find it (some Android phones and smart TVs can't), reserve an IP address for the Pi in your router's settings, usually under "DHCP reservation" or "static lease". Then bookmark `http://<that-ip>:8000`.
+
+---
+
+## Everyday use
+
+```bash
+sudo systemctl start record-collection-sync     # sync with Discogs right now
 journalctl -u record-collection-sync -f         # watch a sync
 journalctl -u record-collection -f              # web app log
-systemctl list-timers record-collection-sync    # when's the next sync
-.venv/bin/python -m app.sync --help             # sync options (--details-limit, --no-images, --refresh-details)
+systemctl list-timers record-collection-sync    # when the next sync runs
 ```
 
-**Back up `data/`.** It's your collection, cached covers, and bin locations. Everything except bins can be rebuilt from Discogs.
+**Updating the app** after new changes are pushed to GitHub:
 
-## Developing
+```bash
+cd ~/records && git pull && ./deploy/setup.sh
+```
+
+**Backing up.** Everything lives in `~/records/data/`: the collection, cached covers, and your bin locations. Everything except bin locations can be rebuilt from Discogs, so the one file worth copying off the Pi is `data/bins.json`. From your computer:
+
+```bash
+scp eli@records.local:records/data/bins.json .
+```
+
+**Shutting down** before unplugging (this protects the SD card):
+
+```bash
+sudo shutdown now
+```
+
+## Troubleshooting
+
+**`ssh: Could not resolve hostname records.local`**
+Wait another minute; the first boot takes a while. If it still fails, find the Pi's IP address in your router's list of connected devices (it'll be named `records`) and use `ssh eli@192.168.x.x` instead. If it never shows up, the Wi-Fi details in Imager were probably wrong. Re-flash the card and check the Wi-Fi country too.
+
+**`REMOTE HOST IDENTIFICATION HAS CHANGED` when connecting**
+This happens if you've re-flashed the card, and it's expected. Clear the old entry, then connect again:
+
+```bash
+ssh-keygen -R records.local
+```
+
+**The page doesn't load**
+Check the service:
+
+```bash
+systemctl status record-collection
+```
+
+If it says `failed`, the reason is in `journalctl -u record-collection -n 50`.
+
+**"No records yet" on the page**
+The sync hasn't finished its first step, or it failed. Run `journalctl -u record-collection-sync -n 30`. A `401` error means the token is wrong; a `404` means the username is wrong. Fix `.env`, then run `sudo systemctl start record-collection-sync`.
+
+**Some records show a plain colored sleeve instead of a cover**
+Either that release has no image on Discogs, or its cover hasn't downloaded yet. The nightly sync retries.
+
+---
+
+## How it fits together
+
+```
+app/        server.py (API + pages), sync.py (Discogs sync CLI), discogs.py, images.py, store.py
+web/        index.html + assets/ (the whole frontend, no build step)
+deploy/     setup.sh, systemd units (web app + nightly sync timer), optional nginx config
+data/       collection.json, bins.json, images/   ← created on the Pi, not in git
+tests/
+```
+
+Sync options: `.venv/bin/python -m app.sync --help`. They include `--details-limit N`, `--no-images` and `--refresh-details`.
+
+### API
+
+| Endpoint | |
+|---|---|
+| `GET /api/collection` | all records, with tracklists and bins |
+| `GET /api/health` | record count and last sync time |
+| `PUT /api/bins/<release_id>` | `{"bin": "A3"}`. Needs an `X-Edit-Token` header if `RC_EDIT_TOKEN` is set |
+| `GET /img/<release_id>/front` or `/back` | cover art. Add `?size=thumb` for a 320px version. Missing covers are fetched from Discogs on demand |
+
+### Developing on your own computer
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
@@ -77,16 +208,15 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 
 Edit files in `web/` and reload the page; no build step.
 
-## API
+### Bringing over data from the old version
 
-| Endpoint | |
-|---|---|
-| `GET /api/collection` | all records, with tracklists and bins |
-| `GET /api/health` | record count and last sync time |
-| `PUT /api/bins/<release_id>` | `{"bin": "A3"}`. Needs an `X-Edit-Token` header if `RC_EDIT_TOKEN` is set |
-| `GET /img/<release_id>/front` or `/back` | cover art. Add `?size=thumb` for a 320px version. Missing covers are fetched from Discogs on demand |
+Not needed, since a sync rebuilds everything from Discogs. But if you have the old app's `collection.json` and image folder, this imports them, covers included:
 
-## Notes
+```bash
+.venv/bin/python -m app.sync import-legacy path/to/collection.json --images path/to/static/images
+```
 
-- Bin editing has no login. That's fine on a home network. If you ever expose this to the internet, set `RC_EDIT_TOKEN` and put it behind something with auth.
-- The sync refuses to overwrite your data if Discogs returns an empty collection (for example, a typo in the username).
+### Notes
+
+- Bin editing has no login. That's fine on a home network. If you ever expose this to the internet, set `RC_EDIT_TOKEN` in `.env` and put it behind something with authentication.
+- The sync won't overwrite your data if Discogs returns an empty collection, for example because of a typo in the username.
