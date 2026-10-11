@@ -9,17 +9,20 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
 import shutil
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config, images, store
-from .discogs import Discogs, DiscogsError, clean_name, details_from_release, record_from_collection_item
+from . import config, images, prices, store
+from .discogs import (Discogs, DiscogsError, clean_name, details_from_release, price_from_release,
+                      record_from_collection_item)
 
-DETAIL_FIELDS = ("tracklist", "images", "country", "released", "notes", "details_synced")
+DETAIL_FIELDS = ("tracklist", "images", "country", "released", "notes", "price", "details_synced")
 
 
 def log(msg: str) -> None:
@@ -57,7 +60,8 @@ def merge(fresh: list[dict], previous: list[dict]) -> list[dict]:
 
 
 def run_sync(client: Discogs, *, details_limit: int | None, fetch_images: bool,
-             refresh_details: bool = False) -> dict:
+             refresh_details: bool = False, price_limit: int | None = None) -> dict:
+    """Returns a summary dict: {"records", "added", "removed", "details_pending", "value"}."""
     if not client.token:
         log("WARNING: DISCOGS_TOKEN not set - only a public collection can be read, and slowly.")
     log(f"Fetching collection for {client.username} ...")
@@ -71,6 +75,14 @@ def run_sync(client: Discogs, *, details_limit: int | None, fetch_images: bool,
         log(f"Removed {removed} back-cover file(s) guessed by an older version")
 
     data = store.load_collection()
+    before = {str(r.get("instance_id") or r["id"]) for r in data["records"]}
+    after = {str(r.get("instance_id") or r["id"]) for r in fresh}
+    # imported data has no instance ids, so compare by release id the first time
+    if before and not any(r.get("instance_id") for r in data["records"]):
+        before, after = {str(r["id"]) for r in data["records"]}, {str(r["id"]) for r in fresh}
+    added, gone = len(after - before), len(before - after)
+    if before:
+        log(f"  {added} new, {gone} no longer in the collection")
     records = merge(fresh, [] if refresh_details else data["records"])
     data.update(records=records, username=client.username, synced_at=now_iso())
     store.save_collection(data)
@@ -95,6 +107,34 @@ def run_sync(client: Discogs, *, details_limit: int | None, fetch_images: bool,
             log(f"  {n}/{len(todo)}")
     store.save_collection(data)
 
+    # Marketplace prices: refresh a rolling batch, oldest-checked first, so the whole
+    # collection is re-priced every week or so without hammering Discogs.
+    limit = config.PRICE_REFRESH if price_limit is None else price_limit
+    stale = sorted((r for r in records if has_details(r) and r["id"] not in seen),
+                   key=lambda r: (r.get("price") or {}).get("checked") or "")
+    batch = [r for r in stale if (r.get("price") or {}).get("checked") != now_iso()[:10]][:max(limit, 0)]
+    if batch:
+        log(f"Refreshing marketplace prices for {len(batch)} record(s) ...")
+        by_id: dict[int, dict] = {}
+        for n, r in enumerate(batch, 1):
+            try:
+                r["price"] = by_id.get(r["id"]) or price_from_release(client.release(r["id"]))
+                by_id[r["id"]] = r["price"]
+            except DiscogsError as exc:
+                log(f"  ! price {r['id']}: {exc}")
+            if n % 50 == 0:
+                store.save_collection(data)
+        store.save_collection(data)
+    prices.note_prices(records)
+
+    value = None
+    try:
+        value = prices.note_value(client.collection_value())
+        log(f"Collection value: {value['display'].get('median')} median "
+            f"({value['display'].get('minimum')} - {value['display'].get('maximum')})")
+    except (DiscogsError, ValueError, KeyError) as exc:
+        log(f"  ! couldn't read collection value: {exc}")
+
     if fetch_images:
         got = failed = 0
         for r in records:
@@ -108,10 +148,14 @@ def run_sync(client: Discogs, *, details_limit: int | None, fetch_images: bool,
                 failed += 1
                 log(f"  ! image {r['id']}: {exc}")
         log(f"Downloaded {got} image(s), {failed} failed")
+    colored = images.update_colors(records)
+    if colored:
+        log(f"Measured cover colors for {colored} record(s)")
 
     missing = sum(1 for r in records if not has_details(r))
     log(f"Done. {len(records)} records; {missing} still waiting on details (next run picks them up).")
-    return data
+    return {"records": len(records), "added": added, "removed": gone, "details_pending": missing,
+            "value": (value or {}).get("display", {}).get("median")}
 
 
 # --------------------------------------------------------------- legacy import
@@ -198,18 +242,68 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m app.sync", description="Sync your Discogs collection.")
     p.add_argument("--details-limit", type=int, default=None,
                    help="max per-release lookups this run (each takes ~1s)")
+    p.add_argument("--prices", type=int, default=None,
+                   help=f"how many records to re-price this run (default {config.PRICE_REFRESH})")
     p.add_argument("--no-images", action="store_true", help="skip downloading cover art")
     p.add_argument("--refresh-details", action="store_true", help="re-fetch tracklists for everything")
     a = p.parse_args(argv)
-    try:
+
+    with sync_lock() as got_lock:
+        if not got_lock:
+            log("Another sync is already running; leaving it to finish.")
+            return 0
         started = time.time()
-        run_sync(Discogs(), details_limit=a.details_limit, fetch_images=not a.no_images,
-                 refresh_details=a.refresh_details)
+        write_status(state="running", started_at=now_iso(), pid=os.getpid())
+        try:
+            summary = run_sync(Discogs(), details_limit=a.details_limit, fetch_images=not a.no_images,
+                               refresh_details=a.refresh_details, price_limit=a.prices)
+        except Exception as exc:  # noqa: BLE001 - report every failure to the UI
+            log(f"ERROR: {exc}")
+            write_status(state="failed", finished_at=now_iso(), error=str(exc)[:300])
+            return 1
         log(f"Finished in {time.time() - started:.0f}s")
+        write_status(state="done", finished_at=now_iso(), summary=summary)
         return 0
-    except DiscogsError as exc:
-        log(f"ERROR: {exc}")
-        return 1
+
+
+# --------------------------------------------------------- lock & status file
+
+class sync_lock:
+    """An exclusive lock so the nightly timer and the web 'Sync now' button never overlap."""
+
+    def __enter__(self) -> bool:
+        config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self.fh = open(config.SYNC_LOCK, "w")
+        try:
+            fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+
+    def __exit__(self, *exc) -> None:
+        self.fh.close()  # closing releases the lock
+
+
+def is_running() -> bool:
+    if not config.SYNC_LOCK.exists():
+        return False
+    with open(config.SYNC_LOCK, "w") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return False
+        except BlockingIOError:
+            return True
+
+
+def read_status() -> dict:
+    st = store.read_json(config.SYNC_STATUS, {})
+    return st if isinstance(st, dict) else {}
+
+
+def write_status(**fields) -> None:
+    st = read_status() if fields.get("state") != "running" else {}
+    st.update(fields)
+    store.write_json(config.SYNC_STATUS, st)
 
 
 if __name__ == "__main__":

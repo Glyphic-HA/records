@@ -7,6 +7,11 @@ A small web app for browsing a vinyl collection that lives on Discogs. It runs o
 - **Stats** shows collection growth over time, genres, decades, and the artists and labels you collect most. Click any bar to list those records.
 - **Record details** show every photo of the release from Discogs, plus the tracklist, label and catalog number, and a link to Discogs. There's also a **Bin** field for noting where a record lives on your shelf.
 - **Back covers:** Discogs doesn't label which photo is the back (uploaders add them in any order), so you pick it. Open a photo and choose **Use as back cover**. After that, clicking the cover flips between front and back. You only do this once per record.
+- **Shelves** draws your actual shelving units. Each cubby shows its records as spines, colored from their covers. Click a cubby to flip through just that bin. Records file themselves alphabetically (see [Filing records on your shelves](#filing-records-on-your-shelves)), and there's a **New arrivals** pile for recent additions.
+- **Collection value:** the Stats page shows Discogs' estimate of what your collection is worth, tracked over time, plus the records that would cost the most to replace. Each record shows the cheapest copy currently for sale, with a small price-history line.
+- **Factoids** at the top of Stats rotate through things like "Your most collected artist is Tom Waits, with 20 records" and "Stacked flat, your records would stand 12 feet tall."
+- **Surprise me** opens a random record from whatever you're currently viewing.
+- **Sync now** (the circular-arrows button) pulls changes from Discogs immediately instead of waiting for the nightly sync.
 - Search covers artist, title, label, catalog number, style, and track names. You can also filter by genre, decade, and format. Every view can be linked to, filters and open record included.
 - Dark and light themes, and it works on a phone.
 - A nightly sync picks up records you've added on Discogs.
@@ -146,6 +151,20 @@ To use plain **http://records.local**, run:
 
 ---
 
+## Filing records on your shelves
+
+The **Shelves** page is set up for two cube units: a 2×4 on the left (cubbies **A1–A8**) and a 4×3 on the right (**B1–B12**). Cubbies are numbered left to right, top to bottom. There's also a **New arrivals** pile standing on top of the right unit.
+
+**One-time setup:** open Shelves, click **Set up filing**, and type the artist of the *first* record in each cubby. Every record files itself into the cubby whose first artist comes at or just before its own, the same way you'd find it by hand ("The" is ignored, as on the List page). Cubbies you leave blank are skipped.
+
+**Adding records:** new records go on the **New arrivals** pile automatically. Once you've physically shelved that pile, click **I've shelved the new arrivals**, and they file themselves alphabetically.
+
+**When a cubby fills up:** a cubby turns gold and says "nearly full" at around 70 records. After you shift records along to the next cubby, update that cubby's first artist in **Edit filing**.
+
+**Exceptions:** type a bin into any record's **Bin** field to put it somewhere by hand. Hand-set bins always win; clear the field to go back to automatic filing.
+
+**Different shelves?** The layout lives in `data/shelves.json`: units (id, name, cols, rows), stacks, and the first artist of each cubby. Edit it and reload the page.
+
 ## Everyday use
 
 ```bash
@@ -161,11 +180,10 @@ systemctl list-timers record-collection-sync    # when the next sync runs
 cd ~/records && git pull && ./deploy/setup.sh
 ```
 
-**Backing up.** Everything lives in `~/records/data/`: the collection, cached covers, your bin locations, and your back-cover picks. Everything else can be rebuilt from Discogs, so the files worth copying off the Pi are `data/bins.json` and `data/backs.json`. From a Windows Command Prompt or PowerShell on your computer, use `pscp`, which comes with PuTTY:
+**Backing up.** Everything lives in `~/records/data/`. The collection and covers can be rebuilt from Discogs, but these files can't, so copy them off the Pi now and then: `bins.json` (hand-set bins), `backs.json` (back-cover picks), `shelves.json` (shelf layout and filing), `value_history.json` and `prices.json` (price history). From a Windows Command Prompt or PowerShell on your computer, use `pscp`, which comes with PuTTY:
 
 ```bat
-pscp eli@records.local:records/data/bins.json .
-pscp eli@records.local:records/data/backs.json .
+pscp eli@records.local:records/data/*.json .
 ```
 
 To drag and drop files instead, [WinSCP](https://winscp.net) connects with the same host, username and password as PuTTY. On Mac or Linux, use `scp` with the same arguments.
@@ -211,7 +229,9 @@ data/       collection.json, bins.json, images/   ← created on the Pi, not in 
 tests/
 ```
 
-Sync options: `.venv/bin/python -m app.sync --help`. They include `--details-limit N`, `--no-images` and `--refresh-details`.
+Sync options: `.venv/bin/python -m app.sync --help`. They include `--details-limit N`, `--prices N`, `--no-images` and `--refresh-details`. Only one sync runs at a time: if the nightly sync and the **Sync now** button overlap, the second one steps aside.
+
+**About prices:** "collection value" is Discogs' own minimum, median and maximum estimate, based on what copies of your releases have sold for. It's recorded once a day. A record's price is the cheapest copy currently listed for sale on Discogs. That's a rough replacement cost, not what yours would sell for, and condition matters a lot. Prices are refreshed in a rolling batch each night.
 
 ### API
 
@@ -221,6 +241,9 @@ Sync options: `.venv/bin/python -m app.sync --help`. They include `--details-lim
 | `GET /api/health` | record count and last sync time |
 | `PUT /api/bins/<release_id>` | `{"bin": "A3"}`. Needs an `X-Edit-Token` header if `RC_EDIT_TOKEN` is set |
 | `PUT /api/backs/<release_id>` | `{"photo": 2}` marks Discogs photo 2 as the back cover; `{"photo": null}` clears it. Same edit-token rule |
+| `GET/POST /api/sync` | sync status / start a sync now (same edit-token rule) |
+| `GET /api/prices/<release_id>` | that record's lowest-price history |
+| `GET/PUT /api/shelves` | shelf layout, cubby first artists, new-arrivals date |
 | `GET /img/<release_id>/<n>` | Discogs photo *n* (0 = front; `front` and `back` also work). Add `?size=thumb` for a 320px version. Photos are fetched from Discogs the first time they're viewed |
 
 ### Developing on your own computer

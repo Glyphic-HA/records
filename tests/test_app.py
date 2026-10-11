@@ -14,6 +14,12 @@ def tmp_data(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "COLLECTION_PATH", tmp_path / "collection.json")
     monkeypatch.setattr(config, "BINS_PATH", tmp_path / "bins.json")
     monkeypatch.setattr(config, "BACKS_PATH", tmp_path / "backs.json")
+    for name, fname in [("PRICES_PATH", "prices.json"), ("VALUE_PATH", "value_history.json"),
+                        ("SYNC_LOCK", "sync.lock"), ("SYNC_STATUS", "sync_status.json"),
+                        ("SYNC_LOG", "sync.log"), ("COLORS_PATH", "colors.json"),
+                        ("SHELVES_PATH", "shelves.json")]:
+        monkeypatch.setattr(config, name, tmp_path / fname)
+    monkeypatch.setattr(config, "DISCOGS_USERNAME", "")
     monkeypatch.setattr(config, "DISCOGS_TOKEN", "")
     monkeypatch.setattr(config, "EDIT_TOKEN", "")
     return tmp_path
@@ -39,6 +45,7 @@ COLLECTION_ITEM = {
 }
 RELEASE = {
     "id": 111, "country": "UK", "released": "1985-09-30", "notes": "",
+    "lowest_price": 12.5, "num_for_sale": 8,
     "tracklist": [
         {"type_": "heading", "title": "Side A", "position": ""},
         {"type_": "track", "position": "A1", "title": "Singapore", "duration": "2:46"},
@@ -72,6 +79,8 @@ class FakeSession:
             return FakeResp(payload={"pagination": {"pages": 1}, "releases": [COLLECTION_ITEM]})
         if url.endswith("/releases/111"):
             return FakeResp(payload=RELEASE)
+        if url.endswith("/collection/value"):
+            return FakeResp(payload={"minimum": "$1,000.00", "median": "$2,345.67", "maximum": "$5,000.00"})
         if url.endswith(".jpg"):
             return FakeResp(content=jpeg_bytes(), headers={"Content-Type": "image/jpeg"})
         return FakeResp(status=404, payload={"message": "not found"})
@@ -259,3 +268,145 @@ def test_bins(client, monkeypatch):
     monkeypatch.setattr(config, "EDIT_TOKEN", "secret")
     assert client.put("/api/bins/111", json={"bin": "C"}).status_code == 403
     assert client.put("/api/bins/111", json={"bin": "C"}, headers={"X-Edit-Token": "secret"}).status_code == 200
+
+
+# ---------------------------------------------------------------- prices, sync control, shelves
+
+def test_prices_and_value_are_recorded():
+    summary = sync.run_sync(fake_client(), details_limit=None, fetch_images=True)
+    assert summary["value"] == "$2,345.67" and summary["records"] == 1
+    [r] = store.load_collection()["records"]
+    assert r["price"]["lowest"] == 12.5 and r["price"]["for_sale"] == 8
+    from app import prices
+    [v] = prices.load_value_history()
+    assert v["median"] == 2345.67 and v["display"]["maximum"] == "$5,000.00"
+    assert prices.load_price_history()["111"][0][1:] == [12.5, 8]
+    # cover color measured for the shelves page
+    assert store.read_json(config.COLORS_PATH, {})["111"].startswith("#")
+
+
+def test_rolling_price_refresh_and_history():
+    from app import prices
+    sync.run_sync(fake_client(), details_limit=None, fetch_images=False)
+    data = store.load_collection()
+    data["records"][0]["price"]["checked"] = "2020-01-01"   # pretend it's stale
+    store.save_collection(data)
+    hist = prices.load_price_history()
+    hist["111"] = [["2020-01-01", 10.0, 3]]
+    store.write_json(config.PRICES_PATH, hist)
+    c = fake_client()
+    sync.run_sync(c, details_limit=None, fetch_images=False, price_limit=5)
+    assert any(u.endswith("/releases/111") for u in c.session.calls)
+    points = prices.load_price_history()["111"]
+    assert [p[1] for p in points] == [10.0, 12.5]
+    # same price again the same day: no new point
+    c2 = fake_client()
+    sync.run_sync(c2, details_limit=None, fetch_images=False, price_limit=5)
+    assert not any(u.endswith("/releases/111") for u in c2.session.calls)  # already checked today
+    assert len(prices.load_price_history()["111"]) == 2
+
+
+def test_value_history_one_entry_per_day():
+    from app import prices
+    prices.note_value({"minimum": "$1", "median": "$2", "maximum": "$3"}, today="2026-01-01")
+    prices.note_value({"minimum": "$1", "median": "$5", "maximum": "$9"}, today="2026-01-01")
+    prices.note_value({"minimum": "$1", "median": "$6", "maximum": "$9"}, today="2026-01-02")
+    assert [(v["date"], v["median"]) for v in prices.load_value_history()] == [("2026-01-01", 5.0), ("2026-01-02", 6.0)]
+
+
+def test_parse_money():
+    from app.discogs import parse_money
+    assert parse_money("$1,234.56") == 1234.56
+    assert parse_money("€1.234,56") == 1234.56
+    assert parse_money("£12") == 12.0
+    assert parse_money("") is None
+
+
+def test_sync_lock_prevents_overlap(monkeypatch):
+    monkeypatch.setattr(sync, "Discogs", lambda: fake_client())
+    with sync.sync_lock() as got:
+        assert got and sync.is_running()
+        assert sync.main([]) == 0           # second sync backs off
+        assert sync.read_status() == {}     # and doesn't touch the status
+    assert not sync.is_running()
+    assert sync.main(["--no-images"]) == 0
+    st = sync.read_status()
+    assert st["state"] == "done" and st["summary"]["records"] == 1
+
+
+def test_sync_failure_is_reported(monkeypatch):
+    class Boom:
+        token, username = "t", "u"
+        def collection(self):
+            raise sync.DiscogsError("401 from Discogs")
+    monkeypatch.setattr(sync, "Discogs", lambda: Boom())
+    assert sync.main([]) == 1
+    st = sync.read_status()
+    assert st["state"] == "failed" and "401" in st["error"]
+
+
+def test_sync_api(client, monkeypatch):
+    import app.server as srv
+    assert client.get("/api/sync").get_json()["running"] is False
+    assert client.post("/api/sync").status_code == 400            # no Discogs details configured
+    monkeypatch.setattr(config, "DISCOGS_TOKEN", "t")
+    monkeypatch.setattr(config, "DISCOGS_USERNAME", "u")
+    started = []
+
+    class FakeProc:
+        def __init__(self, cmd, **kw):
+            started.append(cmd)
+        def wait(self):
+            return 0
+    monkeypatch.setattr(srv.subprocess, "Popen", FakeProc)
+    r = client.post("/api/sync")
+    assert r.status_code == 202 and started and started[0][-2:] == ["-m", "app.sync"]
+    with sync.sync_lock():
+        assert client.post("/api/sync").status_code == 409
+        assert client.get("/api/sync").get_json()["running"] is True
+    monkeypatch.setattr(config, "EDIT_TOKEN", "secret")
+    assert client.post("/api/sync").status_code == 403
+
+
+def test_collection_includes_value_price_and_colors(client):
+    body = client.get("/api/collection").get_json()
+    assert body["records"][0]["price"]["lowest"] == 12.5
+    assert body["value_history"][0]["median"] == 2345.67
+    assert body["colors"]["111"].startswith("#")
+    assert body["currency"] == "USD"
+    hist = client.get("/api/prices/111").get_json()
+    assert hist["history"][0][1] == 12.5
+
+
+def test_shelves_api(client):
+    layout = client.get("/api/shelves").get_json()
+    assert [u["id"] for u in layout["units"]] == ["A", "B"] and layout["stacks"][0]["label"] == "New"
+    assert layout["stacks"][0]["new"] and layout["arrivals_since"]
+    layout["starts"] = {"A1": "!!!", "B3": "Fugazi", "Z9": "ignored", "A2": "  "}
+    saved = client.put("/api/shelves", json=layout).get_json()
+    assert saved["starts"] == {"A1": "!!!", "B3": "Fugazi"}
+    assert client.get("/api/shelves").get_json()["starts"]["B3"] == "Fugazi"
+    bad = dict(layout, units=[{"id": "A", "cols": 0, "rows": 3}])
+    assert client.put("/api/shelves", json=bad).status_code == 400
+    assert client.put("/api/shelves", json=[1]).status_code == 400
+    assert client.put("/api/shelves", json=dict(layout, arrivals_since="soon")).status_code == 400
+
+
+def test_friendly_discogs_errors():
+    from app.discogs import DiscogsError
+    for status, needle, url in [(401, "DISCOGS_TOKEN", "/releases/1"), (404, "DISCOGS_USERNAME", "/users/nobody/collection/value")]:
+        sess = FakeSession()
+        sess.get = lambda u, params=None, timeout=None, st=status: FakeResp(status=st, payload={})
+        c = Discogs(token="t", username="nobody", session=sess, sleep=lambda s: None)
+        with pytest.raises(DiscogsError) as e:
+            c.get(url)
+        assert needle in str(e.value)
+    import requests as rq
+    sess = FakeSession()
+    def boom(u, params=None, timeout=None):
+        raise rq.ConnectionError("proxy said no")
+    sess.get = boom
+    c = Discogs(token="t", username="u", session=sess, sleep=lambda s: None)
+    with pytest.raises(DiscogsError) as e:
+        c.get("/releases/1")
+    assert "Couldn't reach Discogs" in str(e.value)

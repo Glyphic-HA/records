@@ -13,13 +13,16 @@ const store = {
 
 const state = {
   records: [], byUid: new Map(), filtered: [], meta: {},
-  view: "gallery", f: { q: "", genre: "", decade: "", format: "", sort: "added" },
+  view: "gallery", f: { q: "", genre: "", decade: "", format: "", bin: "", sort: "added" }, shelves: null,
   galleryUid: null, listLimit: 150, loaded: false, error: null,
 };
 
 // ------------------------------------------------------------------ helpers
 const decadeOf = (r) => (r.year ? Math.floor(r.year / 10) * 10 : null);
 const sortName = (s) => (s || "").replace(/^(the|a|an)\s+/i, "").trim();
+const sortKey = (s) => sortName(s).toLowerCase();
+const cmpKey = (a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+const VIEWS = ["gallery", "list", "shelves", "stats"];
 const firstLetter = (s) => { const c = sortName(s).charAt(0).toUpperCase(); return /[A-Z]/.test(c) ? c : "#"; };
 
 function sleeveColor(id) {
@@ -50,13 +53,13 @@ function factsLine(r) {
 function parseHash() {
   const [path, query = ""] = location.hash.replace(/^#\/?/, "").split("?");
   const p = new URLSearchParams(query);
-  return { view: ["gallery", "list", "stats"].includes(path) ? path : "gallery", p };
+  return { view: VIEWS.includes(path) ? path : "gallery", p };
 }
 
 function hashFor(view, extra = {}) {
   const p = new URLSearchParams();
   const f = { ...state.f, ...extra };
-  for (const k of ["q", "genre", "decade", "format"]) if (f[k]) p.set(k, f[k]);
+  for (const k of ["q", "genre", "decade", "format", "bin"]) if (f[k]) p.set(k, f[k]);
   if (f.sort && f.sort !== "added") p.set("sort", f.sort);
   if (extra.r) p.set("r", extra.r);
   const qs = p.toString();
@@ -74,18 +77,19 @@ function readRoute() {
   state.view = view;
   state.f = {
     q: p.get("q") || "", genre: p.get("genre") || "", decade: p.get("decade") || "",
-    format: p.get("format") || "", sort: p.get("sort") || "added",
+    format: p.get("format") || "", bin: p.get("bin") || "", sort: p.get("sort") || "added",
   };
   return p.get("r");
 }
 
 // ------------------------------------------------------------------ filters
 function applyFilters() {
-  const { q, genre, decade, format, sort } = state.f;
+  const { q, genre, decade, format, bin, sort } = state.f;
   const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
   let out = state.records.filter((r) => {
     if (genre && !r.genres.includes(genre)) return false;
     if (format && r.format !== format) return false;
+    if (bin && r._bin !== bin) return false;
     if (decade) {
       const d = decadeOf(r);
       if (decade === "none" ? d !== null : String(d) !== decade) return false;
@@ -128,7 +132,13 @@ function populateFilters() {
 function reflectFilters() {
   $("#f-q").value = state.f.q;
   for (const k of ["genre", "decade", "format", "sort"]) $(`#f-${k}`).value = state.f[k];
-  $("#f-clear").hidden = !(state.f.q || state.f.genre || state.f.decade || state.f.format);
+  $("#f-clear").hidden = !(state.f.q || state.f.genre || state.f.decade || state.f.format || state.f.bin);
+  const chip = $("#f-bin");
+  chip.hidden = !state.f.bin;
+  if (state.f.bin) {
+    chip.innerHTML = `${esc(binName(state.f.bin))} <button type="button" aria-label="Show all bins">×</button>`;
+    chip.querySelector("button").onclick = () => { state.f.bin = ""; onFiltersChanged(); };
+  }
 }
 
 function bindFilters() {
@@ -141,7 +151,7 @@ function bindFilters() {
     $(`#f-${k}`).addEventListener("change", (e) => { state.f[k] = e.target.value; onFiltersChanged(); });
   }
   $("#f-clear").addEventListener("click", () => {
-    Object.assign(state.f, { q: "", genre: "", decade: "", format: "" });
+    Object.assign(state.f, { q: "", genre: "", decade: "", format: "", bin: "" });
     onFiltersChanged();
   });
 }
@@ -161,7 +171,8 @@ function render() {
   $$(".tabs a").forEach((a) => { a.href = hashFor(a.dataset.view); });
   const n = state.records.length;
   $("#total-count").textContent = state.loaded ? `${fmtInt(n)} record${n === 1 ? "" : "s"}` : "";
-  document.title = { gallery: "Records", list: "Records: list", stats: "Records: stats" }[state.view];
+  document.title = { gallery: "Records", list: "Records: list", shelves: "Records: shelves", stats: "Records: stats" }[state.view];
+  $("#filters").hidden = state.view === "shelves";
   gallery.teardown();
   const main = $("#view");
   if (state.error) return void (main.innerHTML = emptyState("Couldn't load the collection", state.error));
@@ -170,11 +181,14 @@ function render() {
     return void (main.innerHTML = emptyState("No records yet",
       "Run <code>python -m app.sync</code> on the server to pull your collection from Discogs, then reload this page."));
   }
-  if (!state.filtered.length && state.view !== "stats") {
-    return void (main.innerHTML = emptyState("Nothing matches those filters",
-      `Try a different search, or <a href="${hashFor(state.view, { q: "", genre: "", decade: "", format: "" })}">clear the filters</a>.`));
+  if (!state.filtered.length && !["stats", "shelves"].includes(state.view)) {
+    const inBin = state.f.bin && !(state.f.q || state.f.genre || state.f.decade || state.f.format);
+    return void (main.innerHTML = inBin
+      ? emptyState(`${binName(state.f.bin)} is empty`, `Nothing is filed here yet. <a href="#/shelves">Back to the shelves</a>.`)
+      : emptyState("Nothing matches those filters",
+        `Try a different search, or <a href="${hashFor(state.view, { q: "", genre: "", decade: "", format: "", bin: "" })}">clear the filters</a>.`));
   }
-  ({ gallery: renderGallery, list: renderList, stats: renderStats })[state.view](main);
+  ({ gallery: renderGallery, list: renderList, shelves: renderShelves, stats: renderStats })[state.view](main);
 }
 
 function emptyState(title, body) {
@@ -412,36 +426,218 @@ function renderStats(main) {
   const topArtists = [...artists].filter(([a]) => !/^various/i.test(a)).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 12);
   const topLabels = [...countBy(list, (r) => r.label)].filter(([l]) => l && !/^not on label/i.test(l)).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 12);
 
+  const priced = list.filter((r) => r.price?.lowest != null);
+  const priciest = [...priced].sort((a, b) => b.price.lowest - a.price.lowest).slice(0, 10);
+
   main.innerHTML = `<section class="stats" aria-label="Stats">
-    <div class="wide headline">
-      <p><strong>${fmtInt(list.length)} records</strong>${filteredNote} by <strong>${fmtInt(artists.size)} artists</strong>${firstAdded ? `, collected since ${firstAdded}` : ""}.
-      ${oldest ? `The oldest pressing is <a href="#" data-open="${esc(oldest.uid)}">${esc(oldest.title)}</a> by ${esc(oldest.artist)} (${oldest.year}).` : ""}
-      ${years.length ? `Median release year: ${median(years)}.` : ""}</p>
-    </div>
+    <div class="wide facts" id="facts"></div>
     <div class="wide">${growthChart(dated)}</div>
     <div>${barList("By genre", "Primary Discogs genre. Select a bar to list those records.", genres, (g) => hashFor("list", { genre: g === "Unknown" ? "" : g, q: "" }))}</div>
     <div>${columns("By decade", `Release decade${undated ? `; ${fmtInt(undated)} without a year aren't shown` : ""}.`, decades, (d) => hashFor("list", { decade: String(d) }))}</div>
     <div>${barList("Most collected artists", "Excludes Various Artists compilations.", topArtists, (a) => hashFor("list", { q: a, genre: "", decade: "" , sort: "year" }))}</div>
     <div>${barList("Most collected labels", "First label credited on each release.", topLabels, (l) => hashFor("list", { q: l, genre: "", decade: "" }))}</div>
+    <div class="wide">${valueSection(list)}</div>
+    ${priciest.length ? `<div>${barList("Priciest to replace",
+      `Cheapest copy currently for sale on Discogs. ${fmtInt(priced.length)} of ${fmtInt(list.length)} records have a price so far; prices refresh in rotation, about weekly.`,
+      priciest.map((r) => [`${r.title} (${r.artist})`, r.price.lowest, r.uid]), (k, row) => hashFor("stats", { r: row[2] }), (v) => money(v))}</div>` : ""}
   </section>`;
-  main.querySelectorAll("[data-open]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); openDetail(a.dataset.open, list); }));
   wireGrowth(main, dated);
+  wireValue(main);
+  startFacts(main, buildFacts(list), list);
+}
+
+
+// ---- collection value
+function valueSection(list) {
+  const h = state.meta.value_history || [];
+  const filtered = list.length !== state.records.length;
+  if (!h.length) {
+    return `<h2>Collection value</h2><p class="sub">Shows up after the next sync. Discogs estimates it from what copies of your releases have actually sold for.</p>`;
+  }
+  const last = h[h.length - 1];
+  const d = last.display || {};
+  // change vs. ~30 days ago (or the oldest point we have)
+  const cutoff = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  const base = [...h].reverse().find((x) => x.date <= cutoff) || h[0];
+  let delta = "";
+  if (base !== last && base.median != null && last.median != null) {
+    const diff = last.median - base.median;
+    const when = new Date(base.date + "T12:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    delta = diff === 0 ? `Unchanged since ${when}.` : `${diff > 0 ? "Up" : "Down"} ${money(Math.abs(diff))} since ${when}.`;
+  }
+  const updated = new Date(last.date + "T12:00:00").toLocaleDateString(undefined, { month: "long", day: "numeric" });
+  return `<h2>Collection value</h2>
+    <div class="value-row">
+      <p class="value-big num">${esc(d.median || money(last.median))}</p>
+      <p class="sub">Median estimate from Discogs sales history, between ${esc(d.minimum || money(last.minimum))} and ${esc(d.maximum || money(last.maximum))}.
+        ${esc(delta)} Updated ${esc(updated)}.${filtered ? " This is the whole collection; filters don't apply." : ""}</p>
+    </div>
+    ${h.length >= 2 ? `<div class="growth" id="value-chart"></div>` : `<p class="sub">A chart of how it changes appears after a couple of syncs.</p>`}`;
+}
+
+function wireValue(main) {
+  const box = $("#value-chart", main);
+  const h = (state.meta.value_history || []).filter((x) => x.median != null);
+  if (!box || h.length < 2) return;
+  const cur = state.meta.currency || "USD";
+  let compactMoney;
+  try { compactMoney = new Intl.NumberFormat(undefined, { style: "currency", currency: cur, notation: "compact", maximumFractionDigits: 1 }); }
+  catch { compactMoney = { format: (v) => compact(v) }; }
+  const s = h.map((x) => ({ t: yearFrac(x.date), v: x.median, date: x.date, d: x.display || {} }));
+  lineChart(box, s, {
+    tick: (v) => compactMoney.format(v), end: (v) => money(v),
+    tip: (p) => `${new Date(p.date + "T12:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}: <b>${esc(p.d.median || money(p.v))}</b> median`,
+    aria: `Collection value over time, now ${money(s[s.length - 1].v)}`,
+  });
+}
+
+// ---- factoids: one at a time, random start, rotating
+const parseDur = (d) => {
+  const parts = String(d || "").split(":").map(Number);
+  if (!parts.length || parts.some(isNaN) || parts.length > 3) return 0;
+  return parts.reduce((acc, n) => acc * 60 + n, 0);
+};
+const fmtLen = (sec) => {
+  const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+  return h ? `${h} h ${m} min` : `${m} min`;
+};
+const monthYear = (iso) => new Date(iso).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+const dayDate = (iso) => new Date(iso + "T12:00:00").toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
+
+function buildFacts(list) {
+  const facts = [];
+  const add = (html) => { if (html) facts.push(html); };
+  const link = (r) => `<a href="#" data-open="${esc(r.uid)}">${esc(r.title)}</a>`;
+  const by = (r) => `${link(r)} by ${esc(r.artist)}`;
+  const n = list.length;
+  const artists = countBy(list, (r) => r.artist);
+  const realArtists = [...artists].filter(([a]) => !/^various/i.test(a));
+  const withYear = list.filter((r) => r.year);
+  const dated = list.filter((r) => r.date_added).sort((a, b) => a.date_added.localeCompare(b.date_added));
+  const pct = (k) => Math.round((k / n) * 100);
+
+  add(`<b>${fmtInt(n)} records</b> by <b>${fmtInt(artists.size)} artists</b>${dated.length ? `, collected since ${dated[0].date_added.slice(0, 4)}` : ""}.`);
+  if (withYear.length) {
+    const sorted = [...withYear].sort((a, b) => a.year - b.year);
+    add(`The oldest pressing on your shelves is ${by(sorted[0])}, from ${sorted[0].year}.`);
+    const newest = sorted[sorted.length - 1];
+    add(`The newest release you own is ${by(newest)}, from ${newest.year}.`);
+    add(`Half your records came out before ${median(withYear.map((r) => r.year))}, and half after.`);
+    const dec = [...countBy(withYear, decadeOf)].sort((a, b) => b[1] - a[1])[0];
+    add(`${pct(dec[1])}% of your records were released in the ${dec[0]}s.`);
+  }
+  if (realArtists.length) {
+    const [top, cnt] = realArtists.sort((a, b) => b[1] - a[1])[0];
+    if (cnt > 1) add(`Your most collected artist is <b>${esc(top)}</b>, with ${cnt} records.`);
+    const once = realArtists.filter(([, c]) => c === 1).length;
+    add(`${fmtInt(once)} artists show up exactly once in your collection.`);
+  }
+  // longest career span among artists with 2+ records
+  const spans = new Map();
+  for (const r of withYear) {
+    if (/^various/i.test(r.artist)) continue;
+    const sp = spans.get(r.artist) || [r.year, r.year];
+    spans.set(r.artist, [Math.min(sp[0], r.year), Math.max(sp[1], r.year)]);
+  }
+  const span = [...spans].sort((a, b) => (b[1][1] - b[1][0]) - (a[1][1] - a[1][0]))[0];
+  if (span && span[1][1] - span[1][0] >= 10) {
+    add(`Your <b>${esc(span[0])}</b> records span ${span[1][1] - span[1][0]} years, from ${span[1][0]} to ${span[1][1]}.`);
+  }
+  const labels = [...countBy(list, (r) => r.label)].filter(([l]) => l && !/^not on label/i.test(l)).sort((a, b) => b[1] - a[1]);
+  if (labels.length && labels[0][1] > 2) add(`<b>${esc(labels[0][0])}</b> is the label you own the most of: ${labels[0][1]} records.`);
+  const genres = [...countBy(list, (r) => r.genres[0])].sort((a, b) => b[1] - a[1]);
+  if (genres.length) add(`${pct(genres[0][1])}% of the collection is filed under ${esc(genres[0][0])} on Discogs.`);
+  const styles = [...countBy(list, (r) => r.styles)].sort((a, b) => b[1] - a[1]);
+  if (styles.length) add(`Your most common style is <b>${esc(styles[0][0])}</b>, on ${fmtInt(styles[0][1])} records.`);
+
+  if (dated.length) {
+    const yearsAdded = [...countBy(dated, (r) => r.date_added.slice(0, 4))].sort((a, b) => b[1] - a[1]);
+    add(`${yearsAdded[0][0]} was your biggest year: you added ${fmtInt(yearsAdded[0][1])} records.`);
+    const days = [...countBy(dated, (r) => r.date_added.slice(0, 10))].sort((a, b) => b[1] - a[1]);
+    if (days[0][1] >= 3) add(`On ${dayDate(days[0][0])} you added ${days[0][1]} records in a single day.`);
+    const thisYear = String(new Date().getFullYear());
+    const ytd = dated.filter((r) => r.date_added.startsWith(thisYear)).length;
+    if (ytd) add(`You've added ${fmtInt(ytd)} record${ytd === 1 ? "" : "s"} so far in ${thisYear}.`);
+    add(`The first record you logged on Discogs was ${by(dated[0])}, back in ${monthYear(dated[0].date_added)}.`);
+    const latest = dated[dated.length - 1];
+    add(`Your latest addition is ${by(latest)}.`);
+  }
+  // listening time
+  let tracks = 0, secs = 0, longest = null;
+  for (const r of list) {
+    tracks += r.tracklist.length;
+    const len = r.tracklist.reduce((a, t) => a + parseDur(t.duration), 0);
+    secs += len;
+    if (r.tracklist.length >= 3 && (!longest || len > longest[1])) longest = [r, len];
+  }
+  if (tracks > 50) add(`Your tracklists add up to ${fmtInt(tracks)} tracks.`);
+  if (secs > 36000) add(`The tracks with listed timings come to about ${fmtInt(Math.round(secs / 86400))} days of music, played back to back.`);
+  if (longest && longest[1] > 3600) add(`The longest record by running time is ${by(longest[0])}, at ${fmtLen(longest[1])}.`);
+  const selfTitled = list.filter((r) => r.title.toLowerCase() === r.artist.toLowerCase());
+  if (selfTitled.length >= 3) add(`${selfTitled.length} of your records are self-titled, like ${by(selfTitled[Math.floor(Math.random() * selfTitled.length)])}.`);
+  const longTitle = [...list].sort((a, b) => b.title.length - a.title.length)[0];
+  if (longTitle && longTitle.title.length > 40) add(`Longest title in the collection: ${by(longTitle)}.`);
+  if (n >= 365) add(`Playing one record a day, it would take you ${(n / 365).toFixed(1)} years to hear them all.`);
+  const qty = list.reduce((a, r) => a + (r.qty || 1), 0);
+  const metres = qty * 0.0035; // an LP in its jacket is about 3.5 mm thick
+  if (metres >= 1) add(`Stacked flat, your records would stand about ${Math.round(metres * 3.281)} feet (${metres.toFixed(1)} m) tall.`);
+  // money
+  const h = state.meta.value_history || [];
+  if (h.length && h[h.length - 1].display?.median) add(`Discogs puts your collection's median value at <b>${esc(h[h.length - 1].display.median)}</b>.`);
+  const priced = list.filter((r) => r.price?.lowest != null).sort((a, b) => b.price.lowest - a.price.lowest);
+  if (priced.length) add(`Hardest to replace: ${by(priced[0])}. The cheapest copy for sale right now is ${money(priced[0].price.lowest, priced[0].price.currency)}.`);
+  const pick = list[Math.floor(Math.random() * n)];
+  if (pick) add(`Pulled from the crate at random: ${by(pick)}${pick.year ? ` (${pick.year})` : ""}.`);
+  return facts;
+}
+
+function startFacts(main, facts, list) {
+  const box = $("#facts", main);
+  if (!box || !facts.length) return;
+  // a random fact on every visit, then the rest in shuffled order
+  const order = facts.map((_, i) => i);
+  for (let k = order.length - 1; k > 0; k--) { const j = Math.floor(Math.random() * (k + 1)); [order[k], order[j]] = [order[j], order[k]]; }
+  let i = 0, paused = false, timer = 0;
+  box.innerHTML = `<p class="fact" id="fact-text"></p>
+    <div class="fact-nav"><button type="button" class="text-btn" id="fact-next">Another fact</button><span class="fact-count num" id="fact-count"></span></div>`;
+  const show = () => {
+    const el = $("#fact-text", box);
+    el.classList.remove("in"); void el.offsetWidth; el.classList.add("in");
+    el.innerHTML = facts[order[i]];
+    $("#fact-count", box).textContent = `${i + 1} of ${facts.length}`;
+  };
+  const schedule = () => {
+    clearTimeout(timer);
+    if (!reduceMotion) timer = setTimeout(() => { if (!paused && !document.hidden) { i = (i + 1) % facts.length; show(); } schedule(); }, 9000);
+  };
+  box.addEventListener("pointerenter", () => { paused = true; });
+  box.addEventListener("pointerleave", () => { paused = false; });
+  box.addEventListener("focusin", () => { paused = true; });
+  box.addEventListener("focusout", () => { paused = false; });
+  $("#fact-next", box).addEventListener("click", () => { i = (i + 1) % facts.length; show(); schedule(); });
+  box.addEventListener("click", (e) => {
+    const a = e.target.closest("[data-open]");
+    if (a) { e.preventDefault(); openDetail(a.dataset.open, list); }
+  });
+  show();
+  schedule();
+  gallery.cleanup.push(() => clearTimeout(timer));
 }
 
 const median = (a) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
 
 function tableOf(rows, h1, h2) {
   return `<details><summary>Show as table</summary><table><thead><tr><th>${h1}</th><th>${h2}</th></tr></thead><tbody>${
-    rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${fmtInt(v)}</td></tr>`).join("")}</tbody></table></details>`;
+    rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${typeof v === "number" ? fmtInt(v) : esc(v)}</td></tr>`).join("")}</tbody></table></details>`;
 }
 
-function barList(title, sub, rows, hrefFor) {
+function barList(title, sub, rows, hrefFor, fmt = fmtInt) {
   const max = Math.max(...rows.map((r) => r[1]), 1);
-  return `<h2>${esc(title)}</h2><p class="sub">${esc(sub)}</p><div class="bars">${rows.map(([k, v]) => `
-    <a class="bar-row" href="${hrefFor(k)}" title="${esc(k)}: ${fmtInt(v)}">
+  return `<h2>${esc(title)}</h2><p class="sub">${esc(sub)}</p><div class="bars">${rows.map((row) => { const [k, v] = row; return `
+    <a class="bar-row" href="${hrefFor(k, row)}" title="${esc(k)}: ${fmt(v)}">
       <span class="name">${esc(k)}</span>
-      <span class="track"><span class="fill" style="width:calc((100% - 4ch) * ${v / max})"></span><span class="val">${fmtInt(v)}</span></span>
-    </a>`).join("")}</div>${tableOf(rows, "Name", "Records")}`;
+      <span class="track"><span class="fill" style="width:calc((100% - 7ch) * ${v / max})"></span><span class="val">${fmt(v)}</span></span>
+    </a>`; }).join("")}</div>${tableOf(rows.map((r) => [r[0], fmt(r[1])]), "Name", fmt === fmtInt ? "Records" : "Price")}`;
 }
 
 function columns(title, sub, rows, hrefFor) {
@@ -482,41 +678,62 @@ function growthChart(dated) {
 function wireGrowth(main, dated) {
   const box = $("#growth", main);
   if (!box) return;
-  const s = growthSeries(dated);
+  const s = growthSeries(dated).map((p) => ({ ...p, v: p.total }));
+  const monthName = (k) => new Date(k + "-01T12:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" });
+  lineChart(box, s, {
+    tick: compact, end: fmtInt,
+    tip: (p) => `${monthName(p.k)}: <b>${fmtInt(p.total)}</b> records${p.added ? `, +${p.added} that month` : ""}`,
+    aria: `Collection size over time, reaching ${s[s.length - 1].total} records`,
+  });
+}
+
+const yearFrac = (iso) => { const d = new Date(iso.length === 10 ? iso + "T12:00:00" : iso); const y = d.getFullYear(); return y + (d - new Date(y, 0, 1)) / (365.25 * 864e5); };
+
+// A single-series line chart with a crosshair tooltip. s: [{t (fractional year), v, ...}]
+function lineChart(box, s, o) {
   const draw = () => {
-    const W = box.clientWidth, H = 260, L = 44, R = 64, T = 12, B = 28;
-    const x0 = s[0].t, x1 = s[s.length - 1].t, ymax = niceMax(s[s.length - 1].total);
+    const W = box.clientWidth, H = 260, L = 52, R = 72, T = 12, B = 28;
+    const x0 = s[0].t, x1 = s[s.length - 1].t, ymax = niceMax(Math.max(...s.map((p) => p.v)));
     const X = (t) => L + ((t - x0) / (x1 - x0 || 1)) * (W - L - R);
     const Y = (v) => T + (1 - v / ymax) * (H - T - B);
     const ticks = [0, ymax / 4, ymax / 2, (3 * ymax) / 4, ymax];
-    const yearStep = Math.max(1, Math.ceil((x1 - x0) / Math.max(2, Math.floor((W - L - R) / 70))));
-    const years = [];
-    for (let yv = Math.ceil(x0); yv <= x1; yv += yearStep) years.push(yv);
-    const pts = s.map((p) => `${X(p.t).toFixed(1)},${Y(p.total).toFixed(1)}`);
+    // x labels: years for long spans, months for short ones
+    const xl = [];
+    if (x1 - x0 >= 1.5) {
+      const step = Math.max(1, Math.ceil((x1 - x0) / Math.max(2, Math.floor((W - L - R) / 70))));
+      for (let yv = Math.ceil(x0); yv <= x1; yv += step) xl.push([yv, String(yv)]);
+    } else {
+      const months = Math.max(1, Math.ceil(((x1 - x0) * 12) / Math.max(2, Math.floor((W - L - R) / 60))));
+      const d = new Date(Math.floor(x0), Math.round((x0 % 1) * 12), 1);
+      for (; yearFrac(d.toISOString()) <= x1 + 0.001; d.setMonth(d.getMonth() + months)) {
+        const t = d.getFullYear() + d.getMonth() / 12;
+        if (t >= x0 - 0.001) xl.push([t, d.toLocaleDateString(undefined, { month: "short" })]);
+      }
+    }
+    const pts = s.map((p) => `${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`);
     const last = s[s.length - 1];
-    box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Collection size over time, reaching ${last.total} records">
+    box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(o.aria)}">
       <g class="grid">${ticks.map((v) => `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/>`).join("")}</g>
-      <g class="axis">${ticks.map((v) => `<text x="${L - 8}" y="${Y(v) + 4}" text-anchor="end">${compact(v)}</text>`).join("")}
-        ${years.map((yv) => `<text x="${X(yv)}" y="${H - 6}" text-anchor="middle">${yv}</text>`).join("")}</g>
+      <g class="axis">${ticks.map((v) => `<text x="${L - 8}" y="${Y(v) + 4}" text-anchor="end">${o.tick(v)}</text>`).join("")}
+        ${xl.map(([t, label]) => `<text x="${X(t)}" y="${H - 6}" text-anchor="middle">${label}</text>`).join("")}</g>
       <path class="area" d="M${pts[0]} L${pts.join(" L")} L${X(last.t)},${Y(0)} L${X(s[0].t)},${Y(0)} Z"/>
       <path class="line" d="M${pts.join(" L")}"/>
-      <g class="end"><circle class="dot" cx="${X(last.t)}" cy="${Y(last.total)}" r="4.5"/><text x="${X(last.t) + 10}" y="${Y(last.total) + 4}">${fmtInt(last.total)}</text></g>
+      <g class="end"><circle class="dot" cx="${X(last.t)}" cy="${Y(last.v)}" r="4.5"/><text x="${X(last.t) + 10}" y="${Y(last.v) + 4}">${o.end(last.v)}</text></g>
       <g class="hover" visibility="hidden"><line class="cross" y1="${T}" y2="${H - B}"/><circle class="dot" r="4.5"/></g>
-      <rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent" class="hit"/>
+      <rect x="${L}" y="${T}" width="${Math.max(1, W - L - R)}" height="${H - T - B}" fill="transparent" class="hit"/>
     </svg><div class="tip" hidden></div>`;
     const hover = $(".hover", box), tip = $(".tip", box), hit = $(".hit", box);
-    const monthName = (k) => new Date(k + "-01T12:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" });
     hit.addEventListener("pointermove", (e) => {
       const rect = box.getBoundingClientRect();
       const t = x0 + ((e.clientX - rect.left - L) / (W - L - R)) * (x1 - x0);
       const p = s.reduce((a, b) => (Math.abs(b.t - t) < Math.abs(a.t - t) ? b : a));
-      const cx = X(p.t), cy = Y(p.total);
+      const cx = X(p.t), cy = Y(p.v);
       hover.setAttribute("visibility", "visible");
       hover.querySelector("line").setAttribute("x1", cx); hover.querySelector("line").setAttribute("x2", cx);
       hover.querySelector("circle").setAttribute("cx", cx); hover.querySelector("circle").setAttribute("cy", cy);
       tip.hidden = false;
       tip.style.left = `${cx}px`; tip.style.top = `${cy}px`;
-      tip.innerHTML = `${monthName(p.k)}: <b>${fmtInt(p.total)}</b> records${p.added ? `, +${p.added} that month` : ""}`;
+      tip.innerHTML = o.tip(p);
     });
     hit.addEventListener("pointerleave", () => { hover.setAttribute("visibility", "hidden"); tip.hidden = true; });
   };
@@ -571,6 +788,45 @@ function paintArt(animate = true) {
   box.querySelector(".thumb.on")?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
+function binHelp(r) {
+  if (!state.meta.can_edit) return "";
+  if (r.bin) return "Set by hand. Clear it to file automatically.";
+  if (r._bin) return `Filed automatically in ${esc(binName(r._bin))}`;
+  return "Where it lives on the shelf";
+}
+
+const money = (v, cur = state.meta.currency || "USD") => {
+  if (v == null || isNaN(v)) return "";
+  try { return new Intl.NumberFormat(undefined, { style: "currency", currency: cur, maximumFractionDigits: v >= 100 ? 0 : 2 }).format(v); }
+  catch { return `${cur} ${(+v).toFixed(2)}`; }
+};
+
+function priceFact(r) {
+  const p = r.price;
+  if (!p) return "";
+  const when = p.checked ? new Date(p.checked + "T12:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
+  const listings = `https://www.discogs.com/sell/release/${r.id}`;
+  const body = p.lowest != null
+    ? `From <b>${money(p.lowest, p.currency)}</b> · <a href="${listings}" target="_blank" rel="noopener">${fmtInt(p.for_sale)} for sale</a>`
+    : `None for sale right now`;
+  return `<dt>Market</dt><dd class="price-field">${body}<span class="spark" id="d-spark"></span><small>${when ? `checked ${esc(when)}` : ""}</small></dd>`;
+}
+
+async function loadSparkline(r) {
+  const el = $("#d-spark");
+  if (!el) return;
+  try {
+    const { history } = await (await fetch(`/api/prices/${r.id}`)).json();
+    const pts = (history || []).filter((h) => h[1] != null);
+    if (pts.length < 2 || art.r?.id !== r.id) return;
+    const W = 72, H = 20, vs = pts.map((h) => h[1]), lo = Math.min(...vs), hi = Math.max(...vs);
+    const xy = pts.map((h, i) => `${(i / (pts.length - 1)) * W},${H - 2 - ((h[1] - lo) / (hi - lo || 1)) * (H - 4)}`);
+    const first = vs[0], last = vs[vs.length - 1];
+    el.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Lowest price went from ${money(first)} to ${money(last)}"><polyline points="${xy.join(" ")}" fill="none" stroke="var(--chart)" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
+    el.title = `${money(first)} → ${money(last)} since ${pts[0][0]}`;
+  } catch { /* sparkline is optional */ }
+}
+
 async function setBack(photo) {
   const r = art.r;
   art.msg = "";
@@ -613,8 +869,9 @@ function openDetail(uid, list = state.filtered) {
         ${fact("Genre", r.genres.length ? `<span class="chips">${r.genres.map((g) => `<a class="chip" href="${hashFor("list", { genre: g, q: "", decade: "" })}">${esc(g)}</a>`).join("")}</span>` : "")}
         ${fact("Style", esc(r.styles.join(", ")))}
         ${fact("Added", esc(added))}
+        ${priceFact(r)}
         <dt><label for="d-bin">Bin</label></dt>
-        <dd class="bin-field"><input id="d-bin" value="${esc(r.bin)}" maxlength="40" placeholder="—" autocomplete="off" ${state.meta.can_edit ? "" : "disabled"}><small id="d-bin-msg">${state.meta.can_edit ? "Where it lives on the shelf" : ""}</small></dd>
+        <dd class="bin-field"><input id="d-bin" value="${esc(r.bin)}" maxlength="40" placeholder="${esc(r.bin ? "" : (r._bin || "—"))}" list="bin-labels" autocomplete="off" ${state.meta.can_edit ? "" : "disabled"}><small id="d-bin-msg">${binHelp(r)}</small></dd>
       </dl>
       <div class="tracks"><h3>Tracklist</h3>${tracks.length
         ? `<ol>${tracks.map((t, n) => `<li><span class="pos">${esc(t.position || n + 1)}</span><span>${esc(t.title)}</span><span class="dur">${esc(t.duration)}</span></li>`).join("")}</ol>`
@@ -634,6 +891,7 @@ function openDetail(uid, list = state.filtered) {
   art.shown = 0;
   art.msg = "";
   paintArt(false);
+  loadSparkline(r);
   $("#d-close").onclick = closeDetail;
   if (prev) $("#d-prev").onclick = () => step(prev);
   if (next) $("#d-next").onclick = () => step(next);
@@ -647,7 +905,9 @@ function openDetail(uid, list = state.filtered) {
       if (!res.ok) throw new Error(res.status === 403 ? "Editing is locked on this server" : `Server answered ${res.status}`);
       const out = await res.json();
       for (const x of state.records) if (x.id === r.id) x.bin = out.bin;
-      $("#d-bin-msg").textContent = "Saved";
+      computeBins();
+      bin.placeholder = r.bin ? "" : (r._bin || "—");
+      $("#d-bin-msg").textContent = r.bin ? "Saved" : `Saved. ${binHelp(r)}`;
     } catch (err) {
       $("#d-bin-msg").textContent = `Not saved: ${err.message}`;
     }
@@ -686,6 +946,217 @@ function bindDetail() {
   });
 }
 
+
+// ------------------------------------------------------------------ bins & filing
+// Every record lives in one bin: a hand-set bin wins; otherwise new records sit on the
+// new-arrivals pile; otherwise the record files alphabetically by artist into the cubby
+// whose "first artist" is the closest one at or before it.
+function binName(label) {
+  const st = state.shelves?.stacks.find((x) => x.label === label);
+  return st ? st.name : `Cubby ${label}`;
+}
+
+function allBinLabels() {
+  const sh = state.shelves;
+  if (!sh) return [];
+  const out = [];
+  for (const u of sh.units) for (let n = 1; n <= u.cols * u.rows; n++) out.push(`${u.id}${n}`);
+  return out.concat(sh.stacks.map((x) => x.label));
+}
+
+function autoBin(r) {
+  const sh = state.shelves;
+  if (!sh) return "";
+  const pile = sh.stacks.find((x) => x.new);
+  if (pile && sh.arrivals_since && r.date_added && new Date(r.date_added) > new Date(sh.arrivals_since)) return pile.label;
+  const starts = state._starts;
+  if (!starts.length) return "";
+  const key = sortKey(r.artist);
+  let hit = starts[0][1];
+  for (const [k, label] of starts) { if (cmpKey(k, key) <= 0) hit = label; else break; }
+  return hit;
+}
+
+function computeBins() {
+  const sh = state.shelves;
+  state._starts = sh ? Object.entries(sh.starts).map(([label, a]) => [sortKey(a), label]).sort((x, y) => cmpKey(x[0], y[0])) : [];
+  for (const r of state.records) r._bin = r.bin || autoBin(r);
+  $("#bin-labels").innerHTML = allBinLabels().map((l) => `<option value="${esc(l)}">`).join("");
+  $("#artist-names").innerHTML = [...new Set(state.records.map((r) => r.artist))].sort((a, b) => cmpKey(sortKey(a), sortKey(b)))
+    .map((a) => `<option value="${esc(a)}">`).join("");
+}
+
+async function saveShelves(patch) {
+  const res = await fetch("/api/shelves", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...state.shelves, ...patch }) });
+  if (!res.ok) throw new Error(res.status === 403 ? "Editing is locked on this server" : `Server answered ${res.status}`);
+  state.shelves = await res.json();
+  computeBins();
+}
+
+// ------------------------------------------------------------------ shelves view
+const CUBBY_FULL = 70; // a 13" cube cubby holds roughly 70-80 LPs
+
+function renderShelves(main) {
+  const sh = state.shelves;
+  if (!sh) { main.innerHTML = emptyState("Shelves unavailable", "The shelf layout couldn't be loaded."); return; }
+  const editing = state._editShelves;
+  const colors = state.meta.colors || {};
+  const groups = new Map(allBinLabels().map((l) => [l, []]));
+  let unfiled = 0;
+  for (const r of state.records) {
+    if (!r._bin) unfiled++;
+    else if (groups.has(r._bin)) groups.get(r._bin).push(r);
+    else groups.set(r._bin, [r]); // hand-typed bin that isn't on the shelves
+  }
+  for (const list of groups.values()) list.sort((a, b) => cmpKey(sortKey(a.artist), sortKey(b.artist)) || (a.year || 0) - (b.year || 0));
+  const pile = sh.stacks.find((x) => x.new);
+  const pileCount = pile ? groups.get(pile.label).filter((r) => !r.bin).length : 0;
+  const hasStarts = Object.keys(sh.starts).length > 0;
+
+  const spines = (list) => {
+    const show = list.slice(0, 90);
+    return show.map((r) => {
+      const h = 78 + ((r.id * 7919) % 20);
+      return `<i style="--c:${colors[r.id] || sleeveColor(r.id)};--h:${h}%"></i>`;
+    }).join("");
+  };
+  const cubby = (label, extraClass = "") => {
+    const list = groups.get(label) || [];
+    const range = list.length ? `${list[0].artist} – ${list[list.length - 1].artist}` : "";
+    const full = list.length >= CUBBY_FULL;
+    const href = hashFor("gallery", { bin: label, q: "", genre: "", decade: "", format: "", sort: "artist" });
+    if (editing && !sh.stacks.some((x) => x.label === label)) {
+      return `<div class="cubby editing ${extraClass}">
+        <span class="cubby-label">${esc(label)}</span>
+        <label class="start-field"><span class="sr-only">First artist in ${esc(label)}</span>
+          <input data-start="${esc(label)}" value="${esc(sh.starts[label] || "")}" placeholder="First artist" list="artist-names" autocomplete="off"></label>
+        <span class="cubby-count">${fmtInt(list.length)}</span></div>`;
+    }
+    return `<a class="cubby ${extraClass} ${full ? "full" : ""}" href="${href}" title="${esc(binName(label))}${range ? `: ${esc(range)}` : ""}">
+      <span class="spines" aria-hidden="true">${spines(list)}</span>
+      <span class="cubby-meta"><span class="cubby-label">${esc(label)}</span><span class="cubby-count">${fmtInt(list.length)}${full ? `<span class="full-note"> · nearly full</span>` : ""}</span></span>
+      ${range ? `<span class="cubby-range">${esc(range)}</span>` : ""}</a>`;
+  };
+
+  let room = "";
+  for (const u of sh.units) {
+    const stacks = sh.stacks.filter((x) => x.unit === u.id);
+    room += `<div class="unit" style="--cols:${u.cols};--rows:${u.rows}">
+      <div class="unit-top">${stacks.map((x) => `<div class="stack-slot" style="grid-column:${x.from_col} / ${x.to_col + 1}">${cubby(x.label, "stack")}<span class="stack-name">${esc(x.name)}</span></div>`).join("")}</div>
+      <div class="frame" role="group" aria-label="${esc(u.name)}">${Array.from({ length: u.cols * u.rows }, (_, i) => cubby(`${u.id}${i + 1}`)).join("")}</div>
+      <p class="unit-name">${esc(u.name)}</p></div>`;
+  }
+  const stray = [...groups.keys()].filter((l) => !allBinLabels().includes(l));
+
+  main.innerHTML = `<section class="shelves-view" aria-label="Shelves">
+    <div class="shelves-head">
+      <div><h2>Shelves</h2>
+      <p class="sub">${editing
+        ? "Type the artist of the <b>first</b> record in each cubby. Everything after it, up to the next cubby's first artist, files there automatically."
+        : hasStarts ? "Click a cubby to flip through it." : "Set up filing once and every record finds its cubby, including ones you add later."}</p></div>
+      <div class="shelves-actions">${editing
+        ? `<button type="button" class="btn" id="sh-cancel">Cancel</button><button type="button" class="btn primary" id="sh-save">Save filing</button>`
+        : `${pile && pileCount ? `<button type="button" class="btn" id="sh-shelved">I've shelved the new arrivals (${fmtInt(pileCount)})</button>` : ""}
+           ${state.meta.can_edit ? `<button type="button" class="btn ${hasStarts ? "" : "primary"}" id="sh-edit">${hasStarts ? "Edit filing" : "Set up filing"}</button>` : ""}`}</div>
+    </div>
+    <p class="sh-msg" id="sh-msg" role="status">${unfiled && !editing ? `${fmtInt(unfiled)} record${unfiled === 1 ? " isn't" : "s aren't"} in a cubby yet.` : ""}</p>
+    <div class="room ${editing ? "is-editing" : ""}">${room}</div>
+    ${stray.length && !editing ? `<p class="sub">Also hand-filed outside these shelves: ${stray.map((l) => `<a href="${hashFor("gallery", { bin: l, q: "", genre: "", decade: "", format: "" })}">${esc(l)}</a> (${groups.get(l).length})`).join(", ")}</p>` : ""}
+  </section>`;
+
+  const msg = (t) => { $("#sh-msg").textContent = t; };
+  $("#sh-edit")?.addEventListener("click", () => { state._editShelves = true; render(); });
+  $("#sh-cancel")?.addEventListener("click", () => { state._editShelves = false; render(); });
+  $("#sh-save")?.addEventListener("click", async () => {
+    const starts = {};
+    for (const inp of $$("[data-start]", main)) if (inp.value.trim()) starts[inp.dataset.start] = inp.value.trim();
+    try { await saveShelves({ starts }); state._editShelves = false; applyFilters(); render(); toast("Filing saved"); }
+    catch (err) { msg(`Not saved: ${err.message}`); }
+  });
+  $("#sh-shelved")?.addEventListener("click", async () => {
+    try { await saveShelves({ arrivals_since: new Date().toISOString() }); applyFilters(); render(); toast("New arrivals filed into their cubbies"); }
+    catch (err) { msg(`Not saved: ${err.message}`); }
+  });
+}
+
+// ------------------------------------------------------------------ toast, surprise, sync
+let toastT;
+function toast(text) {
+  const t = $("#toast");
+  t.textContent = text; t.hidden = false;
+  clearTimeout(toastT);
+  toastT = setTimeout(() => { t.hidden = true; }, 5000);
+}
+
+function bindSurprise() {
+  $("#surprise-btn").addEventListener("click", () => {
+    const pool = state.filtered.length ? state.filtered : state.records;
+    if (!pool.length) return;
+    let pick = pool[Math.floor(Math.random() * pool.length)];
+    if (pool.length > 1 && pick.uid === art.r?.uid) pick = pool[(pool.indexOf(pick) + 1) % pool.length];
+    openDetail(pick.uid, pool);
+  });
+}
+
+const syncUi = { polling: 0 };
+const ago = (iso) => {
+  if (!iso) return "never";
+  const s = (Date.now() - new Date(iso)) / 1000;
+  if (s < 90) return "just now";
+  if (s < 5400) return `${Math.round(s / 60)} minutes ago`;
+  if (s < 129600) return `${Math.round(s / 3600)} hours ago`;
+  return `${Math.round(s / 86400)} days ago`;
+};
+
+function paintSync(st) {
+  const btn = $("#sync-btn");
+  btn.hidden = !(state.meta.can_sync && state.meta.can_edit);
+  btn.classList.toggle("spinning", !!st.running);
+  const label = st.running ? "Syncing with Discogs…" : `Last synced ${ago(st.synced_at || state.meta.synced_at)}. Sync now`;
+  btn.title = label; btn.setAttribute("aria-label", label);
+}
+
+async function pollSync(announce) {
+  clearTimeout(syncUi.polling);
+  let st;
+  try { st = await (await fetch("/api/sync", { cache: "no-store" })).json(); } catch { return; }
+  paintSync(st);
+  if (st.running) { syncUi.polling = setTimeout(() => pollSync(true), 4000); return; }
+  syncUi.polling = 0;
+  if (!announce) return;
+  if (st.state === "failed") return toast(`Sync failed: ${st.error || "see the sync log on the Pi"}`);
+  const s = st.summary || {};
+  const bits = [];
+  if (s.added) bits.push(`${s.added} new`);
+  if (s.removed) bits.push(`${s.removed} removed`);
+  toast(`Sync finished${bits.length ? `: ${bits.join(", ")}` : ". Everything's up to date"}`);
+  await reload();
+}
+
+function bindSync() {
+  $("#sync-btn").addEventListener("click", async () => {
+    if ($("#sync-btn").classList.contains("spinning")) return toast("A sync is already running");
+    try {
+      const res = await fetch("/api/sync", { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 409) toast("A sync is already running");
+      else if (!res.ok) return toast(body.error || `Couldn't start a sync (${res.status})`);
+      else toast("Syncing with Discogs. This page updates when it's done");
+      paintSync({ running: true });
+      syncUi.polling = setTimeout(() => pollSync(true), 3000);
+    } catch { toast("Couldn't reach the server"); }
+  });
+}
+
+async function reload() {
+  const keep = { view: state.view, uid: art.r?.uid };
+  await load();
+  populateFilters();
+  applyFilters();
+  render();
+  if ($("#detail").open && keep.uid && state.byUid.has(keep.uid)) openDetail(keep.uid);
+}
+
 // ------------------------------------------------------------------ theme
 function bindTheme() {
   const btn = $("#theme-btn");
@@ -708,15 +1179,21 @@ function bindTheme() {
 // ------------------------------------------------------------------ boot
 async function load() {
   try {
-    const res = await fetch("/api/collection", { cache: "no-cache" });
+    const [res, shelvesRes] = await Promise.all([
+      fetch("/api/collection", { cache: "no-cache" }),
+      fetch("/api/shelves", { cache: "no-cache" }).catch(() => null),
+    ]);
     if (!res.ok) throw new Error(`The server answered ${res.status}. Check the service log on the Pi.`);
     const data = await res.json();
+    state.shelves = shelvesRes?.ok ? await shelvesRes.json() : null;
     state.meta = data;
     state.records = (data.records || []).map((r) => ({
       ...r,
       _hay: [r.title, r.artist, r.label, r.catno, ...(r.styles || []), ...(r.tracklist || []).map((t) => t.title)].join(" ").toLowerCase(),
     }));
     state.byUid = new Map(state.records.map((r) => [r.uid, r]));
+    state.error = null;
+    computeBins();
   } catch (err) {
     state.error = err instanceof TypeError ? "The server couldn't be reached. Is the record-collection service running?" : esc(err.message);
   }
@@ -736,10 +1213,14 @@ function onRoute() {
   bindTheme();
   bindFilters();
   bindDetail();
+  bindSurprise();
+  bindSync();
   readRoute();
   render();
   await load();
   populateFilters();
   addEventListener("hashchange", onRoute);
   onRoute();
+  pollSync(false);  // shows the button, and a spinner if the nightly sync is mid-run
+  setInterval(() => { if (!syncUi.polling && !document.hidden) pollSync(false); }, 60000);
 })();

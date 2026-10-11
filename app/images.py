@@ -161,3 +161,45 @@ def thumbnail(src: Path) -> Path:
         return thumb
     except Exception:
         return src
+
+
+def dominant_color(src: Path) -> str | None:
+    """A representative color for a cover (used to paint record spines on the shelves page)."""
+    try:
+        from PIL import Image
+        with Image.open(src) as im:
+            im = im.convert("RGB")
+            im.thumbnail((48, 48))
+            # middle-ish of the palette: quantize, take the most common non-extreme color
+            pal = im.quantize(colors=5, method=Image.Quantize.MEDIANCUT)
+            counts = sorted(pal.getcolors() or [], reverse=True)
+            palette = pal.getpalette()
+            for _, idx in counts:
+                r, g, b = palette[idx * 3: idx * 3 + 3]
+                if 24 < (r + g + b) / 3 < 235:
+                    return f"#{r:02x}{g:02x}{b:02x}"
+            _, idx = counts[0]
+            r, g, b = palette[idx * 3: idx * 3 + 3]
+            return f"#{r:02x}{g:02x}{b:02x}"
+    except Exception:
+        return None
+
+
+def update_colors(records: list[dict]) -> int:
+    """Fill data/colors.json for covers that don't have a color yet. Returns how many were added."""
+    from . import store
+    colors = dict(store.read_json(config.COLORS_PATH, {}))
+    added = 0
+    for r in records:
+        key = str(r["id"])
+        if key in colors:
+            continue
+        src = find_local(r["id"], "front")
+        if src:
+            c = dominant_color(src)
+            if c:
+                colors[key] = c
+                added += 1
+    if added:
+        store.write_json(config.COLORS_PATH, colors)
+    return added

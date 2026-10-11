@@ -1,9 +1,13 @@
 """Web server: the JSON API, cover images, and the static frontend in web/."""
 from __future__ import annotations
 
+import subprocess
+import sys
+import threading
+
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
-from . import config, images, store
+from . import config, images, prices, shelves, store, sync
 from .discogs import Discogs
 
 
@@ -38,7 +42,22 @@ def public_record(r: dict, bins: dict[str, str], backs: dict[str, int]) -> dict:
         "photos": photos,                                   # how many Discogs photos exist (>= 1)
         "back": back if back and back < photos else None,   # photo index chosen as the back cover
         "bin": bins.get(str(rid), ""),
+        "price": r.get("price") or None,                    # lowest marketplace listing
     }
+
+
+_sync_guard = threading.Lock()
+
+
+def _sync_state() -> dict:
+    st = sync.read_status()
+    running = sync.is_running()
+    tail = []
+    if config.SYNC_LOG.exists():
+        tail = config.SYNC_LOG.read_text(encoding="utf-8", errors="replace").splitlines()[-6:]
+    return {"running": running, "state": "running" if running else st.get("state"), "started_at": st.get("started_at"),
+            "finished_at": st.get("finished_at"), "summary": st.get("summary"), "error": st.get("error"),
+            "log": tail, "synced_at": store.load_collection().get("synced_at")}
 
 
 def _find(release_id: int) -> dict | None:
@@ -90,7 +109,50 @@ def create_app() -> Flask:
             synced_at=data.get("synced_at"),
             username=data.get("username") or config.DISCOGS_USERNAME or None,
             can_edit=not config.EDIT_TOKEN,
+            can_sync=bool(config.DISCOGS_TOKEN and config.DISCOGS_USERNAME),
+            currency=config.CURRENCY,
+            value_history=prices.load_value_history(),
+            colors=store.read_json(config.COLORS_PATH, {}),
         )
+
+    # ---- sync -----------------------------------------------------------------
+    @app.get("/api/sync")
+    def sync_status():
+        return jsonify(_sync_state())
+
+    @app.post("/api/sync")
+    def start_sync():
+        _check_edit()
+        if not (config.DISCOGS_TOKEN and config.DISCOGS_USERNAME):
+            return jsonify(error="Add DISCOGS_USERNAME and DISCOGS_TOKEN to .env first."), 400
+        with _sync_guard:
+            if sync.is_running():
+                return jsonify(_sync_state()), 409
+            config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            log = open(config.SYNC_LOG, "w")
+            proc = subprocess.Popen([sys.executable, "-m", "app.sync"], cwd=config.ROOT,
+                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            threading.Thread(target=proc.wait, daemon=True).start()  # reap it when it exits
+            log.close()
+        return jsonify({**_sync_state(), "running": True}), 202
+
+    # ---- prices ---------------------------------------------------------------
+    @app.get("/api/prices/<int:release_id>")
+    def price_history(release_id: int):
+        return jsonify(history=prices.load_price_history().get(str(release_id), []), currency=config.CURRENCY)
+
+    # ---- shelves --------------------------------------------------------------
+    @app.get("/api/shelves")
+    def get_shelves():
+        return jsonify(shelves.load())
+
+    @app.put("/api/shelves")
+    def put_shelves():
+        _check_edit()
+        try:
+            return jsonify(shelves.save(request.get_json(silent=True)))
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
 
     @app.put("/api/bins/<int:release_id>")
     def put_bin(release_id: int):

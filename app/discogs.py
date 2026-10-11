@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import datetime, timezone
 from typing import Iterator
 
 import requests
@@ -37,7 +38,7 @@ class Discogs:
             try:
                 resp = self.session.get(url, params=params, timeout=30)
             except requests.RequestException as exc:  # network blip: back off and retry
-                last = exc
+                last = DiscogsError("Couldn't reach Discogs. Is the Pi online?")
                 self._sleep(min(2 ** attempt, 30))
                 continue
             if resp.status_code == 429:
@@ -48,11 +49,15 @@ class Discogs:
                 last = DiscogsError(f"{resp.status_code} from Discogs for {url}")
                 self._sleep(min(2 ** attempt, 30))
                 continue
+            if resp.status_code == 401:
+                raise DiscogsError("Discogs rejected the token (401). Check DISCOGS_TOKEN in .env.")
+            if resp.status_code == 404 and "/users/" in url:
+                raise DiscogsError(f"Discogs has no user called '{self.username}'. Check DISCOGS_USERNAME in .env.")
             if resp.status_code >= 400:
                 raise DiscogsError(f"{resp.status_code} from Discogs for {url}: {resp.text[:200]}")
             self._throttle(resp)
             return resp
-        raise DiscogsError(f"Giving up on {url}: {last}")
+        raise last if isinstance(last, DiscogsError) else DiscogsError(f"Discogs kept failing for {url}")
 
     def _throttle(self, resp: requests.Response) -> None:
         """Slow down as the per-minute budget runs low instead of slamming into 429s."""
@@ -81,7 +86,15 @@ class Discogs:
             page += 1
 
     def release(self, release_id: int) -> dict:
-        return self.get(f"/releases/{release_id}").json()
+        # curr_abbr sets the currency of the release's lowest_price field
+        return self.get(f"/releases/{release_id}", params={"curr_abbr": config.CURRENCY}).json()
+
+    def collection_value(self) -> dict:
+        """{"minimum": "$1,234.00", "median": ..., "maximum": ...}: Discogs' estimate from sales history.
+        Only works for your own collection, with your token."""
+        if not self.username:
+            raise DiscogsError("DISCOGS_USERNAME is not set")
+        return self.get(f"/users/{self.username}/collection/value").json()
 
     def download(self, url: str) -> tuple[bytes, str]:
         resp = self.get(url)
@@ -160,5 +173,36 @@ def details_from_release(rel: dict) -> dict:
         "country": rel.get("country") or "",
         "released": rel.get("released") or "",
         "notes": (rel.get("notes") or "").strip()[:2000],
+        "price": price_from_release(rel),
         "details_synced": True,
     }
+
+
+def price_from_release(rel: dict) -> dict:
+    """The cheapest copy currently listed on the Discogs marketplace, and how many are for sale."""
+    lowest = rel.get("lowest_price")
+    return {
+        "lowest": round(float(lowest), 2) if isinstance(lowest, (int, float)) else None,
+        "for_sale": int(rel.get("num_for_sale") or 0),
+        "currency": config.CURRENCY,
+        "checked": datetime.now(timezone.utc).date().isoformat(),
+    }
+
+
+def parse_money(text) -> float | None:
+    """'$1,234.56' -> 1234.56; '€1.234,56' -> 1234.56; '£12' -> 12.0."""
+    if isinstance(text, (int, float)):
+        return float(text)
+    s = re.sub(r"[^\d.,]", "", str(text or ""))
+    if not s:
+        return None
+    if "," in s and "." in s:
+        dec = "," if s.rfind(",") > s.rfind(".") else "."
+        s = s.replace("." if dec == "," else ",", "").replace(dec, ".")
+    elif "," in s:
+        head, _, tail = s.rpartition(",")
+        s = s.replace(",", "") if len(tail) == 3 else head.replace(",", "") + "." + tail
+    try:
+        return round(float(s), 2)
+    except ValueError:
+        return None
